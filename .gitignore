@@ -1,0 +1,19 @@
+# Ambiente e arquivos gerados pelo Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Dados processados e configurações locais
+triagem/
+*.pdf
+*.part
+.env
+.env.*
+
+# Editor e sistema operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
