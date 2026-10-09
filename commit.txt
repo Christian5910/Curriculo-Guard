@@ -1,0 +1,14 @@
+fix: mede contraste contra o fundo real e corrige falhas da revisão (v2.2)
+
+- Contraste agora usa renderização da página sem texto (fundo real,
+  pixel a pixel no retângulo do trecho); anel externo vira plano B.
+  Corrige texto preto sobre caixa/imagem escura que passava sem alerta
+  e falsos positivos com réguas, selos e bordas de tabela em PDFs
+  gerados por LibreOffice, wkhtmltopdf e reportlab
+- Recompõe letras separadas por ponto/hífen (a regra só removia espaço)
+- Busca achatada só roda com letras separadas (evita falso positivo)
+- Relatórios malformados/aninhados em excesso viram inválidos, sem
+  derrubar a listagem de revisão
+- Manifesto de URLs ignora proxies de ambiente, como o download
+- Remove imports sem uso; lê assinatura %PDF- sem carregar o arquivo
+- Atualiza ajuda da interface e documentação; 63 testes
