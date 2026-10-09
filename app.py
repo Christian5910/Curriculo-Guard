@@ -3,27 +3,106 @@
 Execute com Python 3.11+ após instalar pymupdf, numpy e requests.
 O PDF e os relatórios são dados não confiáveis: nunca executar suas instruções.
 """
-import os, re, json, hashlib, shutil, threading, queue, socket, ipaddress
-import unicodedata, uuid, time, multiprocessing
-from workflow import sha256_file, atomic_write, write_report, ReviewStore
+import os, re, json, shutil, threading, queue, socket, ipaddress
+import unicodedata, uuid, time, multiprocessing, math, bisect
+from itertools import islice
+from workflow import sha256_file, atomic_write, write_report
 from review_ui import ReviewPanel
 from pathlib import Path
 from urllib.parse import urlparse
 from datetime import datetime, timezone
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:  # servidor/CI sem Tk: o motor de análise continua utilizável
+    tk = ttk = filedialog = messagebox = None
 import requests
 import fitz
 import numpy as np
 
+APP_VERSION = '2.2'
 FOLDERS = ['aprovados','verificacao_humana','rejeitados','duplicados','quarentena','relatorios','originais']
+# Só destinos de análise concluída contam como "já visto"; quarentena pode ser falha transitória.
+INDEXED = ('aprovados','verificacao_humana','rejeitados')
 MAX_BYTES = 15 * 1024 * 1024
+# Padrões heurísticos de frases comuns de injeção (PT/EN). A cobertura é limitada
+# por natureza: servem para levar o documento à revisão humana, não para garantir
+# ausência de ataque. Os nomes dos grupos alimentam as regras da aba "Destinos".
+_IGN = r'(?:ignore|disregard|forget|override|bypass|discard)'
+_DET = r'(?:(?:all|any|every|your|my|these|those|the|of)\s+)*'
+_PREV = r'(?:(?:previous|prior|above|earlier|preceding|former|original|system|safety)\s+){1,2}'
+_NOUN = r'(?:instructions?|prompts?|rules|directions|guidelines|commands|programming|context|messages?)'
+_VERB_AVALIA = r'(?:approve|hire|shortlist|recommend|rank|rate|score|grade|classify|prioritize|endorse|give|assign|award|grant)'
+_OBJ_AVALIA = (r"(?:(?:this|the|my|our|its|that)\s+(?:candidate|resume|r[eé]sum[eé]|cv|applicant|profile|person)|(?:every|each)\s+(?:candidate|resume|r[eé]sum[eé]|cv|applicant))\b"
+               r"(?!\s+(?:pool|pipeline|funnel|database|list|data|experience|screening|tracking|sourcing))")
+_NOTA_EN = r'(?:(?:highest|maximum|perfect|max|top)\s+(?:possible\s+)?(?:score|rating|rank|ranking|grade|marks?|points))'
+_ALVO_IA = (r"(?:ai|a\.i\.|llm|chatgpt|gpt|chatbot|language\s+model|assistant|model|ats|bots?|algorithm|"
+            r"screening\s+\w+|automated\s+\w+)")
 PATTERNS = [
-    ('instrucao_ia', r'(?i)(ignore (all )?(previous|prior) instructions|ignore todas as instru[cç][oõ]es|desconsidere (as )?instru[cç][oõ]es anteriores)'),
-    ('papel_sistema', r'(?i)(\[\s*(system|developer|assistant)\s*\]|<\s*/?\s*(system|developer|assistant)\s*>|\b(system prompt|developer message)\b)'),
-    ('comando_avaliacao', r'(?i)(approve (this|the) (candidate|resume)|aprove (este|o) candidato|atribua (nota|pontua[cç][aã]o) m[aá]xima|give (me|this candidate) (a )?(perfect|maximum) score)'),
-    ('exfiltracao', r'(?i)(send|envie|transmita).{0,70}(dados|data|curr[ií]culos|resumes).{0,100}(https?://|email|e-mail|@)'),
+    # --- instrucao_ia: pedido para ignorar ou trocar as instruções do avaliador ---
+    ('instrucao_ia', r'(?i)\b' + _IGN + r'\s+' + _DET + _PREV + _NOUN + r'\b'),
+    ('instrucao_ia', r'(?i)\b' + _IGN + r'\s+' + _DET + r'(?:instructions|directions|guidelines)\b'),
+    ('instrucao_ia', r'(?i)\b(?:ignore|disregard|forget)\s+(?:the\s+|all\s+of\s+the\s+|everything\s+)above\b'
+                     r'|\b(?:ignore|disregard|forget)\s+everything\b'
+                     r'|\b(?:forget|disregard)\s+(?:what|anything)\s+(?:you|that)\s+(?:were|was|have\s+been|know|learned)\b'),
+    ('instrucao_ia', r"(?i)\byou\s+are\s+now\b"
+                     r"|\bfrom\s+now\s+on\b(?:\s+[\w'-]+){0,4}?\s+(?:you|your|act|respond|answer|rate|always)\b"
+                     r"|\b(?:act|behave|respond|pretend)\s+(?:as|like)\s+(?:an?|the)\s+(?:\w+\s+){0,2}?(?:ai|assistant|recruiter|evaluator|reviewer|screener|hr|hiring)\b"
+                     r"|\bpretend\s+(?:you\s+are|to\s+be)\b"),
+    ('instrucao_ia', r"(?i)\b(?:note|message|memo|attention|hey|hello|dear)\s+(?:to|for)\s+(?:the\s+)?" + _ALVO_IA + r"\s*[:,!–-]"
+                     r"|\bas\s+an?\s+(?:ai|llm|language\s+model|assistant)\b(?:\s+[\w'-]+){0,6}?\s+(?:must|should|need\s+to|have\s+to|shall)\b"
+                     r"|\bif\s+you\s+are\s+(?:an?\s+)?(?:ai|llm|language\s+model|assistant|chatbot)\b"),
+    ('instrucao_ia', r'(?i)\bnew\s+(?:instructions?|task|objective|directives?)\s*:'),
+    ('instrucao_ia', r'(?i)\b' + _IGN + r'\s+' + _DET + r'(?:job\s+description|requirements|criteria|rubric|screening\s+\w+|evaluation\s+\w+)\b'),
+    ('instrucao_ia', r"(?i)\b(?:do\s+not|don'?t|never)\s+(?:mention|reveal|disclose|tell|say|cite)\b(?:\s+[\w'-]+){0,6}?\s+(?:this|these|hidden|text|instructions?|message)\b"),
+    ('instrucao_ia', r'(?i)\b(?:ignor(?:e|ar)|desconsider(?:e|ar)|esque[cç]a|esquecer|descart(?:e|ar)|desobede[cç]a|desrespeite)\s+(?:(?:todas?|quaisquer|as|os|suas?|seus?|aquelas?)\s+)*'
+                     r'(?:instru[cç][oõ]es|regras|orienta[cç][oõ]es|diretrizes|comandos|ordens)\b'),
+    ('instrucao_ia', r"(?i)\besque[cç]a\s+tudo\b|\bvoc[eê]\s+agora\s+[eé]\b"
+                     r"|\ba\s+partir\s+de\s+agora\b(?:\s+[\w-]+){0,4}?\s+(?:voc[eê]|aja|responda|avalie)\b"
+                     r"|\bse\s+voc[eê]\s+(?:[eé]|for)\s+(?:uma?\s+)?(?:ia|intelig[eê]ncia\s+artificial|modelo\s+de\s+linguagem|assistente|chatbot)\b"
+                     r"|\b(?:nota|mensagem|aviso|recado|aten[cç][aã]o|ol[aá])\s+(?:(?:para|à)\s+)?(?:a\s+)?(?:ia|i\.a\.|intelig[eê]ncia\s+artificial|modelo|assistente|chatbot|ats|rob[oô])\s*[:,!–-]"),
+    ('instrucao_ia', r"(?i)\bn[aã]o\s+(?:mencione|revele|divulgue|diga|cite)\b(?:\s+[\w-]+){0,6}?\s+(?:est[ea]|ess[ea]|texto|instru[cç][oõ]es|mensagem|oculto)\b"),
+    # --- papel_sistema: marcadores de papel/sistema e pedidos para revelar o prompt ---
+    ('papel_sistema', r'(?i)\[\s*/?\s*(?:system|developer|assistant|inst|sys)\s*\]|<<\s*/?\s*sys\s*>>'
+                      r'|<\|\s*(?:im_start|im_end|system|assistant|user|endoftext|eot_id|start_header_id|end_header_id)\s*\|>'),
+    ('papel_sistema', r'(?i)<\s*(?:system|developer|assistant)\s*>[^<]{0,200}?\b(?:you|your|must|ignore|always|never|rate|rank|approve)\b'),
+    ('papel_sistema', r'(?i)#{2,}\s*(?:system|developer|instructions?|task)\s*(?:prompt|message|instructions?)?\s*:|\b(?:system|developer)\s*:\s*you\b|\bnew\s+system\s+prompt\b'),
+    ('papel_sistema', r"(?i)\b(?:reveal|show|print|repeat|output|display|leak|disclose|share)\b(?:\s+[\w'-]+){0,3}?\s+"
+                      r"(?:system\s+prompt|developer\s+message|hidden\s+prompt|initial\s+prompt|your\s+(?:instructions|prompt))\b"
+                      r"|\b(?:revele|mostre|imprima|repita|vaze)\b(?:\s+[\w-]+){0,3}?\s+(?:prompt\s+do\s+sistema|mensagem\s+do\s+sistema|suas\s+instru[cç][oõ]es)\b"),
+    # --- comando_avaliacao: tentativa de ditar a nota ou a decisão sobre o candidato ---
+    ('comando_avaliacao', r"(?i)\b" + _VERB_AVALIA + r"\b(?:\s+[\w'-]+){0,4}?\s+" + _OBJ_AVALIA),
+    ('comando_avaliacao', r"(?i)\b(?:give|assign|award|grant|rate|score|grade|rank)\b(?:\s+[\w'/%-]+){0,5}?\s+" + _NOTA_EN + r"\b"),
+    ('comando_avaliacao', r"(?i)\b(?:this|the)\s+(?:following\s+)?(?:candidate|resume|r[eé]sum[eé]|cv|applicant)\s+(?:is|should\s+be|must\s+be|deserves?)\s+(?:\w+\s+){0,2}?"
+                          r"(?:best|ideal|perfect|exceptional|outstanding|top|highly\s+qualified|hired|shortlisted|approved|ranked\s+first|first|chosen|selected)\b"),
+    ('comando_avaliacao', r"(?i)\b(?:treat|consider|mark|label|flag|regard|classify)\s+(?:this|my)\s+(?:candidate|resume|r[eé]sum[eé]|cv|applicant|profile)\s+as\b"
+                          r"|\b(?:state|say|write|report|output|respond|answer|conclude)\s+that\s+(?:this|the)\s+(?:candidate|applicant)\b"
+                          r"|\b(?:be\s+sure\s+to|make\s+sure\s+to|remember\s+to)\s+(?:mention|say|state|write|report)\b(?:\s+[\w'-]+){0,6}?\s+(?:ideal|best|perfect|exceptional|top)\s+(?:candidate|fit|match)\b"),
+    ('comando_avaliacao', r"(?i)\b(?:aprove|contrate|recomende|selecione|classifique|priorize|pontue|avalie|atribua)\b(?:\s+[\w'-]+){0,4}?\s+"
+                          r"(?:est[ea]|ess[ea]|o|a|meu|minha)\s+(?:candidat[oa]|curr[ií]culo|perfil)\b"),
+    ('comando_avaliacao', r"(?i)\b(?:atribua|dê|conceda|pontue|avalie|classifique)\b(?:\s+[\w'/%-]+){0,5}?\s+"
+                          r"(?:nota\s+m[aá]xima|pontua[cç][aã]o\s+m[aá]xima|maior\s+nota|maior\s+pontua[cç][aã]o|nota\s+(?:10|dez))\b"),
+    ('comando_avaliacao', r"(?i)\b(?:este|esse|o)\s+(?:candidato|curr[ií]culo|perfil)\s+(?:[eé]|deve\s+ser|precisa\s+ser|merece)\s+(?:\w+\s+){0,2}?"
+                          r"(?:o\s+melhor|o\s+primeiro|primeiro|ideal|perfeito|excepcional|excelente|altamente\s+qualificado|contratado|aprovado|selecionado|escolhido)\b"),
+    # --- exfiltracao: pedido para enviar dados/currículos/segredos a um destino externo ---
+    ('exfiltracao', r"(?i)\b(?:send|forward|email|e-mail|post|upload|transmit|leak|exfiltrate|share|copy|export)\b(?:\s+[\w'-]+){0,4}?\s+"
+                    r"(?:this|these|all|every|the|your|my|its|any)\s+(?:\w+\s+){0,3}?"
+                    r"(?:resumes?|r[eé]sum[eé]s?|cvs?|candidates?|applicants?|conversations?|chat\s+history|prompts?|system\s+prompt|credentials?|api\s+keys?|secrets?|passwords?|tokens?|data|files?|documents?|information|details)\b"
+                    r"[^.]{0,100}?(?:https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+|\bto\s+(?:an?\s+|the\s+)?(?:external|remote)\s+(?:server|url|address|email|endpoint))"),
+    ('exfiltracao', r"(?i)\b(?:envie|encaminhe|transmita|compartilhe|vaze|publique|exporte|copie)\b(?:\s+[\w'-]+){0,4}?\s+"
+                    r"(?:est[ea]s?|ess[ea]s?|tod[oa]s?(?:\s+(?:os|as))?|os|as|seus?|suas?|meus?|minhas?)\s+(?:\w+\s+){0,3}?"
+                    r"(?:curr[ií]culos?|candidat[oa]s?|conversas?|hist[oó]rico|prompts?|credenciais|chaves?|segredos?|senhas?|tokens?|dados|arquivos?|documentos?|informa[cç][oõ]es)\b"
+                    r"[^.]{0,100}?(?:https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+)"),
 ]
+
+# Frases de injeção que sobrevivem à normalização apenas quando as letras estão
+# separadas por espaços/pontuação; comparadas sobre o texto "achatado".
+SQUASHED_PHRASES = (
+    'ignorepreviousinstructions', 'ignoreallpreviousinstructions', 'ignorethepreviousinstructions',
+    'ignorepriorinstructions', 'ignoreallpriorinstructions', 'disregardpreviousinstructions',
+    'disregardtheabove', 'ignoretheabove', 'forgeteverything', 'ignoretodasasinstrucoes',
+    'ignoreasinstrucoesanteriores', 'desconsidereasinstrucoesanteriores', 'esquecatudo',
+)
 
 def is_public_https(url):
     """Valida protocolo e IPs públicos; exige política de saída contra DNS rebinding."""
@@ -46,7 +125,7 @@ def download_pdf(url, dest, cancel=None):
         with requests.Session() as session:
             session.trust_env = False
             with session.get(url, stream=True, timeout=(8, 15), allow_redirects=False,
-                             headers={'User-Agent':'CurriculoGuard/2.0'}) as response:
+                             headers={'User-Agent':f'CurriculoGuard/{APP_VERSION}'}) as response:
                 if 300 <= response.status_code < 400: raise ValueError('Redirecionamento bloqueado.')
                 response.raise_for_status()
                 total = 0
@@ -64,11 +143,50 @@ def download_pdf(url, dest, cancel=None):
         partial.unlink(missing_ok=True)
 
 
+_LETTER_SEPARATORS = ' \t.\\-_*|·'
+_SPACED_LETTERS = re.compile(r'(?<!\S)(?:\w[' + _LETTER_SEPARATORS + r']){3,}\w(?!\S)')
+# Letras cirílicas/gregas visualmente idênticas às latinas (só para inspeção).
+_CONFUSABLES = str.maketrans({
+    'а':'a','е':'e','о':'o','р':'p','с':'c','у':'y','х':'x','і':'i','ј':'j','ѕ':'s','ԁ':'d','һ':'h','ԛ':'q','ԝ':'w',
+    'А':'A','В':'B','Е':'E','К':'K','М':'M','Н':'H','О':'O','Р':'P','С':'C','Т':'T','Х':'X','І':'I','Ј':'J','Ѕ':'S',
+    'ο':'o','Ο':'O','α':'a','ν':'v','ι':'i','ρ':'p','τ':'t','Α':'A','Β':'B','Ε':'E','Ι':'I','Κ':'K','Μ':'M','Ν':'N','Ρ':'P','Τ':'T','Χ':'X','Υ':'Y','Ζ':'Z',
+})
+
+
+def _prepare_instruction_text(text):
+    """NFKC, confusáveis cirílicos/gregos e remoção de controles invisíveis."""
+    text = unicodedata.normalize('NFKC', text).translate(_CONFUSABLES)
+    return ''.join(c for c in text if unicodedata.category(c) != 'Cf')
+
+
 def normalized_instruction_text(text):
-    """NFKC, remoção de controles invisíveis e espaços uniformes para heurísticas."""
-    text = unicodedata.normalize('NFKC', text)
-    text = ''.join(c for c in text if unicodedata.category(c) != 'Cf')
+    """Texto preparado, letras separadas recompostas e espaços uniformes."""
+    text = _prepare_instruction_text(text)
+    # "i g n o r e" / "i.g.n.o.r.e" -> "ignore" (só para inspeção).
+    text = _SPACED_LETTERS.sub(lambda m: re.sub('[' + _LETTER_SEPARATORS + ']', '', m.group()), text)
     return re.sub(r'\s+', ' ', text)
+
+
+def squashed_instruction_text(text):
+    """Texto só com letras minúsculas sem acento, para achar frases com letras separadas."""
+    text = unicodedata.normalize('NFKD', unicodedata.normalize('NFKC', text).translate(_CONFUSABLES))
+    return ''.join(c for c in text.lower() if c.isalpha() and not unicodedata.combining(c))
+
+
+def instruction_alerts(raw_text):
+    """Alertas de possível instrução dirigida à IA para um texto de inspeção."""
+    prepared = _prepare_instruction_text(raw_text)
+    text = normalized_instruction_text(prepared)
+    found = []
+    for name, pattern in PATTERNS:
+        for m in islice(re.finditer(pattern, text), 8):
+            found.append({'type':name,'severity':'review','detail':'Possível instrução dirigida ao avaliador automatizado','sample':text[max(0,m.start()-40):m.end()+40]})
+    # Texto achatado ignora pontuação; só é consultado quando há letras separadas
+    # (ofuscação), para não casar frases legítimas como "never forget. Everything...".
+    if (not any(a['type'] == 'instrucao_ia' for a in found) and _SPACED_LETTERS.search(prepared)
+            and any(f in squashed_instruction_text(prepared) for f in SQUASHED_PHRASES)):
+        found.append({'type':'instrucao_ia','severity':'review','detail':'Possível instrução dirigida ao avaliador (letras separadas)'})
+    return found
 
 
 def rgb(value):
@@ -86,6 +204,15 @@ def contrast(a, b):
     l1, l2 = luminance(a), luminance(b)
     return (max(l1, l2) + .05) / (min(l1, l2) + .05)
 
+def _reliable_median(samples):
+    """Mediana das amostras de fundo, ou None quando a região é heterogênea."""
+    if len(samples) < 10: return None
+    # Uma região heterogênea não fornece evidência confiável de fundo local.
+    median = np.median(samples, axis=0)
+    if np.percentile(np.max(np.abs(samples - median), axis=1), 90) > 35:
+        return None
+    return median
+
 def local_background(image, rect, scale):
     """Estima fundo pela mediana de um anel externo; não prova cor sob cada glifo."""
     h, w = image.shape[:2]
@@ -98,13 +225,67 @@ def local_background(image, rect, scale):
     if patch.size == 0: return None
     mask = np.ones(patch.shape[:2], dtype=bool)
     mask[max(0,y0-b):max(0,y1-b), max(0,x0-a):max(0,x1-a)] = False
-    samples = patch[mask]
-    if len(samples) < 10: return None
-    # Um anel heterogêneo não fornece evidência confiável de fundo local.
-    median = np.median(samples, axis=0)
-    if np.percentile(np.max(np.abs(samples - median), axis=1), 90) > 35:
+    return _reliable_median(patch[mask])
+
+def local_backgrounds(image, rect, scale, window=40):
+    """Plano B do anel: fundo em janelas horizontais ao longo do trecho (uma por janela).
+
+    Trechos largos sobre gradientes têm fundo diferente em cada ponta; medir por
+    janela evita tratar um gradiente suave como fundo indeterminado. Cada janela
+    usa só as faixas acima e abaixo do texto (e as laterais nas pontas). Valor
+    None indica janela heterogênea (foto, textura): não há estimativa confiável.
+    """
+    h, w = image.shape[:2]
+    x0, y0, x1, y1 = [int(round(x * scale)) for x in rect]
+    x0, x1 = max(0, x0), min(w, x1)
+    y0, y1 = max(0, y0), min(h, y1)
+    if x1 <= x0 or y1 <= y0: return [None]
+    m = 5
+    count = max(1, math.ceil((x1 - x0) / window))
+    edges = np.linspace(x0, x1, count + 1).astype(int)
+    result = []
+    for k in range(count):
+        a, b = int(edges[k]), int(edges[k + 1])
+        ca, cb = max(0, a - (m if k == 0 else 0)), min(w, b + (m if k == count - 1 else 0))
+        parts = [image[max(0,y0-m):y0, ca:cb].reshape(-1,3), image[y1:min(h,y1+m), ca:cb].reshape(-1,3)]
+        if k == 0: parts.append(image[y0:y1, max(0,a-m):a].reshape(-1,3))
+        if k == count - 1: parts.append(image[y0:y1, b:min(w,b+m)].reshape(-1,3))
+        result.append(_reliable_median(np.concatenate(parts)))
+    return result
+
+_LINEAR = np.array([((v/255)/12.92 if v/255 <= .04045 else (((v/255)+.055)/1.055)**2.4) for v in range(256)])
+
+def text_free_image(doc, index, dpi):
+    """Renderiza a página SEM nenhum texto: o fundo real sob cada trecho.
+
+    Medir o fundo dentro do próprio retângulo do texto evita o anel externo, que
+    confundia réguas e bordas com fundo heterogêneo e deixava passar texto sobre
+    um retângulo do mesmo tamanho. Imagens e desenhos são preservados.
+    Devolve None se a página não puder ser reprocessada (usa-se o anel).
+    """
+    scratch = fitz.open()
+    try:
+        scratch.insert_pdf(doc, from_page=index, to_page=index)
+        page = scratch[0]; page.set_rotation(0)
+        page.add_redact_annot(page.rect, fill=False)
+        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                              text=fitz.PDF_REDACT_TEXT_REMOVE)
+        pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csRGB, alpha=False, annots=True)
+        return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3).copy()
+    except Exception:
         return None
-    return median
+    finally:
+        scratch.close()
+
+def background_contrast(clean, rect, scale, fg):
+    """Razão de contraste entre a cor do texto e cada pixel do fundo real do trecho."""
+    h, w = clean.shape[:2]
+    x0, y0, x1, y1 = [int(round(v * scale)) for v in rect]
+    x0, x1, y0, y1 = max(0, x0), min(w, x1), max(0, y0), min(h, y1)
+    if x1 <= x0 or y1 <= y0: return None
+    lum = _LINEAR[clean[y0:y1, x0:x1].reshape(-1, 3)] @ np.array([.2126, .7152, .0722])
+    lf = luminance(fg)
+    return (np.maximum(lf, lum) + .05) / (np.minimum(lf, lum) + .05)
 
 def overlap(a, b):
     """Retorna fração da área de A coberta pelo retângulo B."""
@@ -114,13 +295,35 @@ def overlap(a, b):
     base = max(.00001, (a[2]-a[0]) * (a[3]-a[1]))
     return area / base
 
+def covered_fraction(box, others, cell=.5):
+    """Fração da área de `box` coberta pela UNIÃO dos retângulos `others`.
+
+    Cobrir o texto com vários retângulos pequenos não deve escapar do limite:
+    por isso a união é rasterizada numa grade fina em vez de testar cada objeto.
+    """
+    x0, y0, x1, y1 = box
+    width, height = x1 - x0, y1 - y0
+    if width <= 0 or height <= 0: return 0.0
+    nx = max(1, min(400, math.ceil(width / cell)))
+    ny = max(1, min(80, math.ceil(height / cell)))
+    mask = np.zeros((ny, nx), dtype=bool)
+    for o in others:
+        ox0, oy0, ox1, oy1 = max(x0,o[0]), max(y0,o[1]), min(x1,o[2]), min(y1,o[3])
+        if ox1 <= ox0 or oy1 <= oy0: continue
+        i0, i1 = round((ox0-x0)/width*nx), round((ox1-x0)/width*nx)
+        j0, j1 = round((oy0-y0)/height*ny), round((oy1-y0)/height*ny)
+        mask[j0:j1, i0:i1] = True
+    return float(mask.mean())
+
 def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
-                contrast_limit=1.2, opacity_limit=.95, overlap_limit=.75,
+                contrast_limit=2.0, opacity_limit=.95, overlap_limit=.75,
                 enabled=None, max_pages=35):
     """Extrai texto elegível e evidências; contraste/oclusão são estimativas.
 
     PDF mede fontes em pontos. DPI referência define o limite de leitura;
     DPI análise define somente a resolução da imagem usada para contraste.
+    O contraste é medido contra o fundo real (página renderizada sem texto);
+    se isso falhar, recai na estimativa pelo anel ao redor do trecho.
     """
     enabled = set(enabled) if enabled is not None else {'size','contrast','opacity','overlap','commands'}
     alerts, texts, metrics = [], [], {'pages':0, 'characters':0, 'small':0, 'low_contrast':0, 'transparent':0, 'overlap':0}
@@ -150,7 +353,12 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
             pix = page.get_pixmap(dpi=analysis_dpi, colorspace=fitz.csRGB, alpha=False, annots=True)
             image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height,pix.width,3)
             scale = analysis_dpi / 72
+            clean = text_free_image(doc, pn - 1, analysis_dpi) if 'contrast' in enabled else None
+            if clean is not None and clean.shape != image.shape: clean = None
             bboxlog = page.get_bboxlog()
+            # Só objetos de preenchimento podem ocultar texto; índice por ordem de desenho.
+            fills = [(i, b) for i, (t, b) in enumerate(bboxlog) if t in ('fill-image','fill-path','fill-shade')]
+            fill_order = [i for i, _ in fills]
             # Interseção de retângulos sugere oclusão; não comprova invisibilidade.
             traces = page.get_texttrace()  # Falha deve ir para quarentena.
             blocked_boxes = []
@@ -167,12 +375,11 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                 seq = tr.get('seqno',-1)
                 box = tr.get('bbox')
                 if 'overlap' in enabled and box and seq >= 0:
-                    for later_type, later_box in bboxlog[seq+1:]:
-                        if later_type in ('fill-image','fill-path','fill-shade') and overlap(box,later_box) > overlap_limit:
-                            blocked_boxes.append(box)
-                            metrics['overlap'] += 1
-                            alerts.append({'type':'possivel_sobreposicao','severity':'review','page':pn,'detail':'Objeto posterior sobre região textual','bbox':list(box)})
-                            break
+                    later = [b for _, b in fills[bisect.bisect_right(fill_order, seq):] if overlap(box, b) > 0]
+                    if later and covered_fraction(box, later) > overlap_limit:
+                        blocked_boxes.append(box)
+                        metrics['overlap'] += 1
+                        alerts.append({'type':'possivel_sobreposicao','severity':'review','page':pn,'detail':'Objetos posteriores sobre região textual','bbox':list(box)})
             if sum(len(part) for part in inspection_parts) > 1_000_000:
                 raise ValueError('Conteúdo textual excede 1 milhão de caracteres.')
             raw = page.get_text('dict', sort=True)
@@ -198,15 +405,32 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                             metrics['small'] += len(t)
                             alerts.append({'type':'fonte_pequena','severity':'review','page':pn,'detail':f'{size_px:.1f}px @ {reference_dpi}DPI','sample':t[:100],'bbox':list(span['bbox'])})
                             continue
-                        bg = local_background(image, span['bbox'], scale)
-                        fg = rgb(span['color'])
-                        if 'contrast' in enabled and bg is None:
-                            alerts.append({'type':'fundo_indeterminado','severity':'review','page':pn,'sample':t[:100],'bbox':list(span['bbox'])})
-                            continue
-                        elif 'contrast' in enabled and contrast(fg,bg) < contrast_limit:
-                            metrics['low_contrast'] += len(t)
-                            alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':f'Contraste estimado {contrast(fg,bg):.2f}:1','sample':t[:100],'bbox':list(span['bbox'])})
-                            continue
+                        if 'contrast' in enabled:
+                            fg = rgb(span['color'])
+                            # Plano B (renderização sem texto indisponível): anel único e, se for
+                            # heterogêneo, janelas, o que acomoda gradientes suaves.
+                            ratios = background_contrast(clean, span['bbox'], scale, fg) if clean is not None else None
+                            if ratios is not None:
+                                low = float((ratios < contrast_limit).mean())  # fração do fundo onde o texto não é legível
+                                if low >= .5:
+                                    metrics['low_contrast'] += len(t)
+                                    alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':f'Contraste estimado {float(np.median(ratios)):.2f}:1','sample':t[:100],'bbox':list(span['bbox'])})
+                                    continue
+                                if low >= .2:
+                                    alerts.append({'type':'fundo_indeterminado','severity':'review','page':pn,'sample':t[:100],'bbox':list(span['bbox'])})
+                                    continue
+                                fragments.append(t); continue
+                            single = local_background(image, span['bbox'], scale)
+                            backgrounds = [single] if single is not None else local_backgrounds(image, span['bbox'], scale)
+                            known = [b for b in backgrounds if b is not None]
+                            worst = min((contrast(fg,b) for b in known), default=None)
+                            if worst is not None and worst < contrast_limit:
+                                metrics['low_contrast'] += len(t)
+                                alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':f'Contraste estimado {worst:.2f}:1','sample':t[:100],'bbox':list(span['bbox'])})
+                                continue
+                            if len(known) < len(backgrounds):
+                                alerts.append({'type':'fundo_indeterminado','severity':'review','page':pn,'sample':t[:100],'bbox':list(span['bbox'])})
+                                continue
                         fragments.append(t)
                     line_text = ''.join(fragments).strip()
                     if line_text: page_lines.append(line_text)
@@ -218,10 +442,7 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
         inspection = '\n'.join(inspection_parts)
         if any(unicodedata.category(c) == 'Cf' for c in inspection):
             alerts.append({'type':'controles_unicode','severity':'review','detail':'Controles invisíveis/direcionais encontrados; podem ser legítimos.'})
-        inspection = normalized_instruction_text(inspection)
-        for name, pattern in PATTERNS if 'commands' in enabled else []:
-            for m in list(re.finditer(pattern,inspection))[:8]:
-                alerts.append({'type':name,'severity':'review','detail':'Possível instrução dirigida ao avaliador automatizado','sample':inspection[max(0,m.start()-40):m.end()+40]})
+        if 'commands' in enabled: alerts.extend(instruction_alerts(inspection))
         if doc.embfile_count() > 0:
             alerts.append({'type':'anexos_embutidos','severity':'review','detail':'PDF contém anexos embutidos'})
     # Reduz alertas repetidos por tipo/página, preservando um exemplo.
@@ -292,7 +513,7 @@ class Pipeline:
             folder.mkdir(parents=True, exist_ok=True)
         self.hashes = {}
         for file in self.root.rglob('*.pdf'):
-            if not file.is_symlink() and file.parent.name in FOLDERS and file.parent.name != 'originais':
+            if not file.is_symlink() and file.parent.name in INDEXED:
                 try: self.hashes[sha256_file(file)] = str(file)
                 except OSError: pass
 
@@ -305,7 +526,8 @@ class Pipeline:
         if digest in self.hashes and not self.reprocess:
             return self._move(source,'duplicados',{'reason':'hash duplicado','duplicate_of':self.hashes[digest]})
         try:
-            if source.read_bytes()[:5] != b'%PDF-':
+            with source.open('rb') as stream: header = stream.read(5)
+            if header != b'%PDF-':
                 return self._move(source,'quarentena',{'reason':'assinatura inválida'})
             result = analyze_isolated(source, dict(reference_dpi=self.reference_dpi,analysis_dpi=self.analysis_dpi,min_px=self.min_px,**self.analysis_options), self.timeout)
             # Bloqueio documental impede ingestão automática.
@@ -334,7 +556,7 @@ class Pipeline:
             raise ValueError('Arquivo mudou durante a cópia; tente novamente.')
         stamp = datetime.now(timezone.utc).isoformat()
         report.update({'id':identifier,'sha256':digest,'file':str(target),'original_name':source.name,
-                       'status':folder,'processed_at':stamp,'history':[],'app_version':'2.0'})
+                       'status':folder,'processed_at':stamp,'history':[],'app_version':APP_VERSION})
         report_path = self.root / 'relatorios' / (target.stem+'.json')
         try: write_report(report_path,report)
         except Exception:
@@ -342,7 +564,7 @@ class Pipeline:
             raise
         if 'text' in report and folder == 'aprovados':
             atomic_write(report_path.with_suffix('.txt'),report['text'])
-        self.hashes.setdefault(digest, str(target))
+        if folder in INDEXED: self.hashes.setdefault(digest, str(target))
         return folder, target
 
 class App:
@@ -363,7 +585,7 @@ class App:
         self.refdpi = tk.IntVar(value=96)
         self.dpi = tk.IntVar(value=150)
         self.minpx = tk.DoubleVar(value=8)
-        self.contrast = tk.DoubleVar(value=1.2)
+        self.contrast = tk.DoubleVar(value=2.0)
         self.opacity = tk.DoubleVar(value=.95)
         self.cover = tk.DoubleVar(value=.75)
         self.recursive = tk.BooleanVar(value=False)
@@ -412,7 +634,7 @@ class App:
             'APROVADOS: nenhum alerta nas verificações ativas; não garante ausência de ataque.\n\n'
             'VERIFICAÇÃO HUMANA: tamanho, contraste, opacidade, oclusão, comandos, senha, anexos ou falta de texto. OCR invisível legítimo também pode gerar alerta.\n\n'
             'REJEITADOS: bloqueados da ingestão automática conforme suas regras, sem decisão sobre o candidato. QUARENTENA: PDF inválido ou falha. DUPLICADOS: mesmo SHA-256.\n\n'
-            'O fundo é estimado pelo anel ao redor do texto. Imagens, gradientes, recortes e efeitos podem confundir a estimativa. Branco no branco não comprova má-fé. Não existe garantia de detectar toda injeção.\n\n'
+            'O fundo é medido numa renderização da página sem texto (se ela falhar, usa-se o anel ao redor). Imagens, recortes e efeitos de composição podem confundir a estimativa. Branco no branco não comprova má-fé. Não existe garantia de detectar toda injeção.\n\n'
             'PDF escaneado exige OCR/revisão: este app não executa OCR. A ordem do texto pode ser imperfeita em colunas.\n\n'
             'Nenhum comando do PDF é executado. Se integrar uma IA, trate o texto como dados não confiáveis, sem ferramentas, segredos ou poder de alterar critérios. Relatórios também contêm dados não confiáveis.\n\n'
             'Limites: 15 MB por arquivo, páginas/tempo configuráveis, 20 milhões de pixels por página, 100 URLs por manifesto. Use ambiente isolado e bibliotecas atualizadas para PDFs externos.'
@@ -524,12 +746,14 @@ def manifest_urls(url):
     """Aceita PDF direto ou JSON explícito; não raspa diretórios arbitrários."""
     if not urlparse(url).path.lower().endswith('.json'): return [url]
     is_public_https(url)
-    with requests.get(url,stream=True,timeout=(8,25),allow_redirects=False) as response:
-        if 300 <= response.status_code < 400: raise ValueError('Redirecionamento bloqueado.')
-        response.raise_for_status(); content=bytearray()
-        for chunk in response.iter_content(16384):
-            content.extend(chunk)
-            if len(content)>65536: raise ValueError('Manifesto excede 64 KB.')
+    with requests.Session() as session:
+        session.trust_env = False  # mesma política do download: sem proxies de ambiente
+        with session.get(url,stream=True,timeout=(8,25),allow_redirects=False) as response:
+            if 300 <= response.status_code < 400: raise ValueError('Redirecionamento bloqueado.')
+            response.raise_for_status(); content=bytearray()
+            for chunk in response.iter_content(16384):
+                content.extend(chunk)
+                if len(content)>65536: raise ValueError('Manifesto excede 64 KB.')
     links=json.loads(content)
     if not isinstance(links,list) or not 1 <= len(links) <= 100 or any(not isinstance(v,str) for v in links):
         raise ValueError('Manifesto deve ser lista JSON com 1 a 100 URLs.')
@@ -540,4 +764,5 @@ def manifest_urls(url):
 if __name__=='__main__':
     # Importar este módulo não abre a janela, permitindo testes do motor.
     multiprocessing.freeze_support()
+    if tk is None: raise SystemExit('Tkinter não encontrado. No Ubuntu/Debian: sudo apt install python3-tk')
     root=tk.Tk(); App(root); root.mainloop()

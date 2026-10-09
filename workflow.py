@@ -49,13 +49,30 @@ class ReviewStore:
         if not self.reports.resolve().is_relative_to(self.root):
             raise ValueError('Pasta de relatórios aponta para fora da saída.')
 
+    @staticmethod
+    def load_report(path):
+        """Lê um relatório e valida a estrutura que a interface consome.
+
+        Relatórios são dados não confiáveis: JSON profundamente aninhado ou com
+        campos de tipo errado viram erro contabilizado, nunca exceção na tela.
+        """
+        try: data = json.loads(Path(path).read_text(encoding='utf-8'))
+        except RecursionError as exc: raise ValueError('JSON aninhado em excesso') from exc
+        if not isinstance(data, dict): raise ValueError('Relatório não é objeto JSON')
+        alerts, history = data.get('alerts', []), data.get('history', [])
+        if not isinstance(alerts, list) or not all(isinstance(a, dict) for a in alerts):
+            raise ValueError('Campo alerts inválido')
+        if not isinstance(history, list) or not all(isinstance(h, dict) and all(isinstance(h.get(k), str) for k in ('time','reviewer','to','reason')) for h in history):
+            raise ValueError('Campo history inválido')
+        if not isinstance(data.get('text', ''), str): raise ValueError('Campo text inválido')
+        return data
+
     def list_reports(self, status='todos', query=''):
         """Lista apenas JSONs válidos; relatórios corrompidos são contabilizados."""
         rows, errors = [], []
         for path in sorted(self.reports.glob('*.json'), reverse=True):
             try:
-                data = json.loads(path.read_text(encoding='utf-8'))
-                if not isinstance(data, dict): raise ValueError('Relatório não é objeto JSON')
+                data = self.load_report(path)
                 if status != 'todos' and data.get('status') != status: continue
                 name = data.get('original_name', Path(data.get('file','')).name)
                 if query.casefold() not in str(name).casefold(): continue
@@ -82,7 +99,7 @@ class ReviewStore:
         if report_path.parent != self.reports.resolve(): raise ValueError('Relatório fora da saída.')
         if status not in ('aprovados','rejeitados','verificacao_humana'): raise ValueError('Destino inválido.')
         if not reviewer.strip() or not reason.strip(): raise ValueError('Informe revisor e justificativa.')
-        data = json.loads(report_path.read_text(encoding='utf-8'))
+        data = self.load_report(report_path)
         source = self.checked_pdf(data)
         if data.get('status') in ('quarentena','duplicados'):
             raise ValueError('Reprocesse este arquivo antes de tomar uma decisão.')

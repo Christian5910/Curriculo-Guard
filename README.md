@@ -68,8 +68,8 @@ As configurações podem ser salvas e carregadas em JSON. O lote mostra progress
 | `aprovados` | Nenhum alerta nas verificações ativas, ou liberação documental por um revisor. |
 | `verificacao_humana` | Documento sinalizado que precisa de conferência. |
 | `rejeitados` | Documento bloqueado da ingestão automática conforme as regras ou uma revisão. |
-| `quarentena` | Falha de processamento, arquivo inválido ou limite excedido. |
-| `duplicados` | Conteúdo com SHA-256 já encontrado na saída. |
+| `quarentena` | Falha de processamento, arquivo inválido ou limite excedido. É reanalisado na próxima execução. |
+| `duplicados` | Conteúdo com SHA-256 já analisado (aprovados, verificação humana ou rejeitados). |
 | `originais` | Downloads preservados. |
 | `relatorios` | Evidências e histórico em JSON; TXT somente para documentos liberados. |
 
@@ -96,9 +96,9 @@ A fonte vetorial de um PDF é medida em pontos; ela não tem um DPI único. A co
 tamanho_px = tamanho_em_pontos × DPI_referencia / 72
 ```
 
-A 96 DPI, uma fonte de 6 pontos corresponde a 8 pixels. O **DPI de renderização** controla a imagem usada na estimativa de contraste; ele não altera o limite definido pelo DPI de referência.
+A 96 DPI, uma fonte de 6 pontos corresponde a 8 pixels. O **DPI de renderização** controla a imagem usada na estimativa de contraste; ele não altera o limite definido pelo DPI de referência. O contraste mínimo padrão é **2,0:1** (a versão 2.0 usava 1,2:1, permissivo demais para texto quase invisível).
 
-A cor do fundo é estimada a partir da região ao redor do texto. Fundos heterogêneos seguem para revisão quando a estimativa não é confiável. Sobreposição é calculada por retângulos e indica suspeita, não uma prova de ocultação.
+O fundo é medido pixel a pixel numa renderização da própria página sem texto, dentro do retângulo de cada trecho; se essa renderização falhar, usa-se uma estimativa pela região ao redor. Trechos cujo fundo torna o texto ilegível em boa parte da área são excluídos e revisados; fundos parcialmente problemáticos (por exemplo, texto claro sobre foto) seguem para revisão. Sobreposição é calculada por retângulos e indica suspeita, não uma prova de ocultação.
 
 ## 🧪 Testes
 
@@ -108,13 +108,14 @@ Com as dependências instaladas:
 python -m unittest discover -v
 ```
 
-A versão 2.0 passou por **32 testes automatizados**, cobrindo filtragem, DPI, conteúdo auxiliar, Unicode, persistência, revisão, integridade, limites de tempo, prévia PNG, CSV e downloads simulados.
+A versão 2.2 passou por **63 testes automatizados**, cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV e downloads simulados. O motor de análise importa e roda sem Tkinter.
 
 A interface ainda não foi validada visualmente no ambiente de desenvolvimento. Downloads foram testados com respostas simuladas, não com um servidor externo real.
 
 ## ⚠️ Limites que fazem parte do projeto
 
 - A detecção é **heurística**: pode produzir falsos positivos e falsos negativos.
+- A detecção de frases de injeção cobre formulações comuns em português e inglês. Em um conjunto de 30 frases novas, escritas depois dos padrões, detectou 22 (73%); em 40 frases legítimas de currículo, nenhuma foi sinalizada. Variações criativas, outros idiomas e paráfrases passam.
 - Não há OCR integrado; PDFs escaneados precisam de outro fluxo de análise.
 - Camadas OCR invisíveis e recursos legítimos de acessibilidade podem gerar alertas.
 - Imagens, gradientes, recortes e efeitos de composição podem confundir a inspeção visual.

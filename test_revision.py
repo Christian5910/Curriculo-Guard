@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import fitz
-from app import analyze_pdf, Pipeline, download_pdf, normalized_instruction_text, analyze_isolated
+from app import analyze_pdf, Pipeline, download_pdf, normalized_instruction_text, analyze_isolated, APP_VERSION
 from workflow import ReviewStore, sha256_file
 from review_ui import render_preview
 
@@ -141,6 +141,7 @@ class ExtraRegressionTests(unittest.TestCase):
     setUp = RevisionTests.setUp
     tearDown = RevisionTests.tearDown
     pdf = RevisionTests.pdf
+    output = RevisionTests.output
 
     def test_outside_visible_page(self):
         path=self.pdf()
@@ -163,5 +164,46 @@ class ExtraRegressionTests(unittest.TestCase):
         output=self.root/'output';output.mkdir();outside=self.root/'external';outside.mkdir()
         (output/'aprovados').symlink_to(outside,target_is_directory=True)
         with self.assertRaises(ValueError):Pipeline(output)
+
+    def test_quarantined_file_is_retried_not_marked_duplicate(self):
+        path=self.pdf()
+        with patch('app.analyze_isolated',side_effect=TimeoutError('simulado')):
+            pipe=Pipeline(self.root/'output');self.assertEqual(pipe.process(path)[0],'quarentena')
+        self.assertEqual(pipe.process(path)[0],'aprovados')          # mesma execução
+        self.assertEqual(Pipeline(self.root/'output',reprocess=False).process(path)[0],'duplicados')  # agora sim
+    def test_quarantine_does_not_block_new_run(self):
+        path=self.pdf()
+        with patch('app.analyze_isolated',side_effect=TimeoutError('simulado')):
+            self.assertEqual(Pipeline(self.root/'output').process(path)[0],'quarentena')
+        self.assertEqual(Pipeline(self.root/'output').process(path)[0],'aprovados')   # nova execução do app
+    def test_report_records_app_version(self):
+        _,_,_,report=self.output(self.pdf())
+        self.assertEqual(json.loads(report.read_text())['app_version'],APP_VERSION)
+    def test_manifest_ignores_environment_proxies(self):
+        from app import manifest_urls
+        class Response:
+            status_code=200
+            def __enter__(self): return self
+            def __exit__(self,*a): return False
+            def raise_for_status(self): pass
+            def iter_content(self,size): yield b'["https://a.example/x.pdf"]'
+        class Session:
+            trust_env=True; last=None
+            def __enter__(self): return self
+            def __exit__(self,*a): return False
+            def get(self,*a,**k): Session.last=self; return Response()
+        with patch('app.requests.Session',Session),patch('app.is_public_https'):
+            self.assertEqual(manifest_urls('https://h.example/m.json'),['https://a.example/x.pdf'])
+        self.assertFalse(Session.last.trust_env)
+    def test_malformed_reports_are_counted_not_raised(self):
+        from workflow import ReviewStore
+        reports=self.root/'out'/'relatorios';reports.mkdir(parents=True)
+        bad={'deep.json':'['*200000,'alerts.json':json.dumps({'alerts':'x'}),'items.json':json.dumps({'alerts':[1,2]}),
+             'hist.json':json.dumps({'history':[{'a':1}]}),'text.json':json.dumps({'text':5})}
+        for name,content in bad.items(): (reports/name).write_text(content)
+        (reports/'ok.json').write_text(json.dumps({'status':'verificacao_humana','original_name':'ok.pdf','alerts':[{'type':'x'}],'history':[]}))
+        rows,errors=ReviewStore(self.root/'out').list_reports()
+        self.assertEqual([p.name for p,_ in rows],['ok.json']); self.assertEqual(len(errors),len(bad))
+        with self.assertRaises(ValueError): ReviewStore(self.root/'out').decide(reports/'deep.json','aprovados','R','motivo')
 
 if __name__=='__main__':unittest.main()
