@@ -3,26 +3,29 @@ import base64
 import multiprocessing
 import threading
 import queue
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import fitz
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+except ImportError:  # ambiente sem Tk: render_preview continua disponível
+    tk = ttk = filedialog = messagebox = None
+import pymupdf
 from workflow import ReviewStore
 
 
 def _render_child(sender, path, number, boxes):
     """Renderiza uma página com teto de pixels e destaca retângulos de alertas."""
     try:
-        with fitz.open(path) as doc:
+        with pymupdf.open(path) as doc:
             if doc.needs_pass: raise ValueError('PDF exige senha.')
             if not 0 <= number < len(doc): raise ValueError('Página inexistente.')
             page = doc[number]; page.set_rotation(0)
             width, height = page.rect.width, page.rect.height
             if width <= 0 or height <= 0: raise ValueError('Dimensões inválidas.')
             for box in boxes:
-                rect = fitz.Rect(box) & page.rect
+                rect = pymupdf.Rect(box) & page.rect
                 if not rect.is_empty: page.draw_rect(rect,color=(1,0,0),width=.7)
             scale = min(600/width, 650/height, (2_000_000/(width*height))**.5)
-            pix = page.get_pixmap(matrix=fitz.Matrix(scale,scale),alpha=False)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(scale,scale),alpha=False)
             sender.send(('ok',(pix.tobytes('png'),len(doc))))
     except Exception as exc: sender.send(('error',str(exc)))
     finally: sender.close()
@@ -46,9 +49,10 @@ def render_preview(path, number, boxes):
         sender.close();receiver.close()
 
 
-class ReviewPanel(ttk.Frame):
+class ReviewPanel(ttk.Frame if ttk else object):
     """Lista, detalhes, CSV e decisões; desabilita alterações durante o lote."""
     def __init__(self, parent, root_var, busy):
+        if tk is None: raise RuntimeError('Tkinter não está disponível neste ambiente.')
         super().__init__(parent,padding=8)
         self.root_var,self.busy=root_var,busy
         self.rows={};self.previews=queue.Queue();self.preview_token=0
