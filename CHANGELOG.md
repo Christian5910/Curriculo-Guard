@@ -1,3 +1,21 @@
+# Versão 2.4
+
+- **Verificação de tinta visível:** como o motor já renderiza a página com e sem texto, cada trecho agora precisa deixar diferença visível entre as duas imagens. Antes, texto com cor declarada legível mas invisível na prática (modo de mesclagem `Screen`/`Lighten`/`Difference` sobre um fundo desenhado, ou preenchimento por padrão branco) passava sem alerta e entrava no TXT. Em 539 trechos legítimos medidos (LibreOffice, wkhtmltopdf, reportlab e layouts sintéticos), o de menor tinta marcou 89 de 255, contra o limite de 16. Limite conhecido: se outro texto visível ocupa o mesmo lugar, a tinta é atribuída a ele.
+- **Desempenho em PDFs com imagens grandes:** a renderização sem texto passou a usar um segundo documento aberto uma única vez, com a redação feita no lugar, em vez de copiar a página (com fontes e imagens) para um documento novo a cada página. Em um PDF de 13,6 MB com 35 páginas, a análise caiu de 17,5 s para 2,4 s, com resultado idêntico.
+- 4 cenários novos em `evaluation/run_pdfs.py` (24 de 24 ataques escondidos) e 4 testes novos; teste de que a análise preserva todas as páginas e nunca altera o arquivo. 73 testes passaram.
+- Verificado em Python 3.11 com as versões mínimas declaradas (PyMuPDF 1.26.6, numpy 1.26.4, requests 2.32.3) e em Python 3.13 com as mais recentes.
+
+# Versão 2.3
+
+Sem mudança no comportamento da detecção; mudanças de estrutura e de verificação.
+
+- **Motor separado da interface:** a análise, o roteamento, os downloads e o lote agora vivem em `engine.py`, que não importa Tkinter. `app.py` ficou só com a interface. A orquestração do lote (`run_batch`) e a validação de limites (`validate_params`) saíram da classe da interface e podem ser usadas em scripts.
+- Migração de `import fitz` para `import pymupdf` (a API `fitz` está sendo descontinuada).
+- Nova pasta `evaluation/` com o corpus de frases (separando o conjunto ajustado do conjunto inédito), a linha de base da v2.0 e três scripts que reproduzem as medições do README. A v2.0 gerava 7 falsos positivos em 46 frases legítimas do conjunto de desenvolvimento; a atual gera 0.
+- Integração contínua (GitHub Actions) com testes e avaliação em Ubuntu e Windows, Python 3.11 a 3.13; `requirements-dev.txt`.
+- Teste de PDFs gerados por reportlab; testes de `run_batch`, `validate_params` e do isolamento do Tkinter; teste de symlink ignorado quando o sistema não permite criá-los.
+- 69 testes passaram.
+
 # Versão 2.2
 
 - **Fundo real em vez de anel:** o contraste passa a ser medido contra uma renderização da página sem texto, pixel a pixel dentro do retângulo de cada trecho. Isso corrige dois problemas do método do anel: (1) texto preto sobre caixa preta do tamanho exato do texto, ou sobre imagem escura, passava sem alerta; (2) réguas sob títulos, selos e bordas de tabela geravam `fundo_indeterminado` e retiravam conteúdo legítimo do texto filtrado. Em currículos gerados por LibreOffice, wkhtmltopdf e reportlab, os alertas indevidos desapareceram. O anel segue como plano B se a renderização falhar.
