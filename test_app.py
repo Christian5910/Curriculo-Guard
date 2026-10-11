@@ -264,4 +264,55 @@ class DetectionRegressionTests(unittest.TestCase):
         result,err=self.run_python("import sys; sys.modules['tkinter']=None; import app; assert app.tk is None; print('ok')")
         self.assertEqual(result,['ok'],err)
 
+
+class AssetAndConsistencyTests(unittest.TestCase):
+    """Ícone do aplicativo e coerência entre a interface e o motor."""
+    ASSETS=Path(__file__).resolve().parent/'assets'
+
+    @staticmethod
+    def load_module(path,name):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location(name,path); module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module); return module
+
+    def test_icon_pngs_exist_with_the_size_in_their_name_and_transparency(self):
+        for size in (16,32,48,64,128,256,512):
+            pixmap=pymupdf.Pixmap(str(self.ASSETS/f'icon_{size}.png'))
+            self.assertEqual((pixmap.width,pixmap.height),(size,size)); self.assertTrue(pixmap.alpha,size)
+            self.assertEqual(pixmap.pixel(0,0)[3],0,f'canto de {size}px deve ser transparente'); self.assertGreater(pixmap.pixel(size//2,size//2)[3],200)
+
+    def test_icon_assets_are_up_to_date_with_the_svg(self):
+        maker=self.load_module(self.ASSETS/'make_icons.py','make_icons'); svg=(self.ASSETS/'icon.svg').read_bytes()
+        for size in maker.SIZES: self.assertEqual((self.ASSETS/f'icon_{size}.png').read_bytes(),maker.render(svg,size),f'icon_{size}.png desatualizado: rode python assets/make_icons.py')
+        self.assertEqual((self.ASSETS/'icon.ico').read_bytes(),maker.build_ico([(size,maker.render(svg,size)) for size in maker.ICO_SIZES]))
+
+    def test_ico_header_and_entries_are_valid(self):
+        import struct
+        data=(self.ASSETS/'icon.ico').read_bytes(); reserved,kind,count=struct.unpack('<HHH',data[:6])
+        self.assertEqual((reserved,kind,count),(0,1,6)); sizes=[]
+        for index in range(count):
+            width,height,_,_,planes,bits,length,offset=struct.unpack('<BBBBHHII',data[6+16*index:22+16*index])
+            self.assertEqual(data[offset:offset+8],b'\x89PNG\r\n\x1a\n'); self.assertEqual(len(data[offset:offset+length]),length); sizes.append(width or 256)
+        self.assertEqual(sizes,[16,32,48,64,128,256])
+
+    def test_load_icons_ignores_missing_and_unreadable_files(self):
+        from app import load_icons
+        self.assertEqual(sorted(load_icons(lambda file:file,folder=self.ASSETS)),[16,32,48,64,256])
+        self.assertEqual(load_icons(lambda file:file,folder=self.ASSETS/'nao_existe'),{})
+        def broken(file): raise RuntimeError('png inválido')
+        self.assertEqual(load_icons(broken,folder=self.ASSETS),{})
+
+    def test_engine_error_labels_match_the_interface_labels_and_ranges(self):
+        from engine import SETTING_LIMITS, OPTION_LIMITS
+        source=(Path(__file__).resolve().parent/'app.py').read_text(encoding='utf-8')
+        for key,label,low,high in SETTING_LIMITS+OPTION_LIMITS:
+            self.assertIn(label,source,f'{key}: a interface não usa o rótulo {label!r}'); self.assertIn(f'({low}–{high})',source,f'{key}: faixa {low}–{high} ausente na interface')
+
+    def test_form_labels_never_exceed_the_compact_width(self):
+        import re
+        from app import COMPACT_LABEL_WIDTH
+        source=(Path(__file__).resolve().parent/'app.py').read_text(encoding='utf-8')
+        labels=re.findall(r"self\.field\(\w+,\s*'([^']+)'[^)]*compact=True",source)+re.findall(r"\('([^']+)',self\.\w+\)",source[source.index("for label, var in [('DPI"):][:900])
+        self.assertGreaterEqual(len(labels),8)
+        for label in labels: self.assertLessEqual(len(label),COMPACT_LABEL_WIDTH,label)
+
 if __name__=='__main__': unittest.main()

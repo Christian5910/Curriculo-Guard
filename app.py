@@ -13,6 +13,26 @@ try:
 except ImportError:  # servidor/CI sem Tk: importar este módulo continua possível
     tk = ttk = filedialog = messagebox = None
 
+ASSETS = Path(__file__).resolve().parent / 'assets'
+ICON_SIZES = (256, 64, 48, 32, 16)   # janela/barra de tarefas; o cabeçalho usa HEADER_ICON
+HEADER_ICON = 48
+COMPACT_LABEL_WIDTH = 46   # em caracteres: cabe o rótulo mais longo e mantém as caixas alinhadas
+
+
+def load_icons(photo_image, folder=ASSETS, sizes=ICON_SIZES):
+    """Carrega os PNGs do ícone que existirem; arquivo ausente ou ilegível é ignorado.
+
+    `photo_image` é o construtor de imagem do Tk (recebido por parâmetro para poder
+    testar sem interface). O app funciona normalmente, só sem ícone, se faltar a pasta.
+    """
+    icons = {}
+    for size in sizes:
+        path = Path(folder) / f'icon_{size}.png'
+        if not path.is_file(): continue
+        try: icons[size] = photo_image(file=str(path))
+        except Exception: continue   # tk.TclError em PNG inválido; nunca impede abrir o app
+    return icons
+
 
 class App:
     """Interface por abas; somente a thread principal acessa o Tkinter."""
@@ -22,6 +42,10 @@ class App:
         master.title('Currículo Guard')
         master.geometry('850x740')
         master.minsize(800, 680)
+        self.icons = load_icons(tk.PhotoImage)   # mantém referência: o Tk descarta imagens sem dono
+        if self.icons:
+            try: master.iconphoto(True, *[self.icons[size] for size in sorted(self.icons, reverse=True)])
+            except tk.TclError: pass
         self.q = queue.Queue()
         self.cancel = threading.Event()
         self.url = tk.StringVar()
@@ -44,8 +68,11 @@ class App:
         self.routes = {}
         base = ttk.Frame(master, padding=12)
         base.pack(fill='both', expand=True)
-        ttk.Label(base, text='Currículo Guard', font=('Arial', 18, 'bold')).pack(anchor='w')
-        ttk.Label(base, text='Triagem técnica de PDFs. Aprovação documental não é aprovação de contratação.').pack(anchor='w', pady=5)
+        header = ttk.Frame(base); header.pack(fill='x', pady=(0, 5))
+        if HEADER_ICON in self.icons: ttk.Label(header, image=self.icons[HEADER_ICON]).pack(side='left', padx=(0, 10))
+        titles = ttk.Frame(header); titles.pack(side='left', anchor='center')
+        ttk.Label(titles, text='Currículo Guard', font=('Arial', 18, 'bold')).pack(anchor='w')
+        ttk.Label(titles, text='Triagem técnica de PDFs. Aprovação documental não é aprovação de contratação.').pack(anchor='w', pady=(2, 0))
         tabs = ttk.Notebook(base)
         tabs.pack(fill='both', expand=True)
         entry, rules, folders, help_tab = [ttk.Frame(tabs, padding=12) for _ in range(4)]
@@ -62,7 +89,7 @@ class App:
         self.field(entry,'Tempo máximo por análise em segundos (5–180)',self.timeout,compact=True)
         self.field(entry,'Máximo de páginas (1–100)',self.maxpages,compact=True)
         ttk.Label(entry, text='Originais preservados. Nenhum arquivo é apagado. Downloads não seguem redirecionamentos.').pack(anchor='w', pady=10)
-        for key, label in [('size','Filtrar fonte pequena'),('contrast','Estimar contraste com fundo local'),('opacity','Filtrar texto invisível ou semitransparente'),('overlap','Sinalizar possível objeto sobreposto'),('commands','Procurar padrões de instruções para IA')]:
+        for key, label in [('size','Filtrar fonte pequena'),('contrast','Medir contraste e tinta visível contra o fundo real'),('opacity','Filtrar texto invisível ou semitransparente'),('overlap','Sinalizar possível objeto sobreposto'),('commands','Procurar padrões de instruções para IA')]:
             ttk.Checkbutton(rules, text=label, variable=self.checks[key]).pack(anchor='w')
         for label, var in [('DPI referência (36–600)',self.refdpi),('DPI renderização (72–300)',self.dpi),('Fonte mínima em px (1–30)',self.minpx),('Contraste mínimo (1–21)',self.contrast),('Opacidade mínima (0–1)',self.opacity),('Cobertura suspeita (0–1)',self.cover)]:
             self.field(rules,label,var, compact=True)
@@ -80,8 +107,8 @@ class App:
         help_text = (
             'APROVADOS: nenhum alerta nas verificações ativas; não garante ausência de ataque.\n\n'
             'VERIFICAÇÃO HUMANA: tamanho, contraste, opacidade, oclusão, comandos, senha, anexos ou falta de texto. OCR invisível legítimo também pode gerar alerta.\n\n'
-            'REJEITADOS: bloqueados da ingestão automática conforme suas regras, sem decisão sobre o candidato. QUARENTENA: PDF inválido ou falha. DUPLICADOS: mesmo SHA-256.\n\n'
-            'O fundo é medido numa renderização da página sem texto (se ela falhar, usa-se o anel ao redor). Imagens, recortes e efeitos de composição podem confundir a estimativa. Branco no branco não comprova má-fé. Não existe garantia de detectar toda injeção.\n\n'
+            'REJEITADOS: bloqueados da ingestão automática conforme suas regras, sem decisão sobre o candidato. QUARENTENA: PDF inválido ou falha (reanalisado na próxima execução). DUPLICADOS: mesmo SHA-256 já analisado.\n\n'
+            'O fundo é medido numa renderização da página sem texto (se ela falhar, usa-se o anel ao redor) e cada trecho precisa deixar tinta visível. Fotos, recortes e textos sobrepostos podem confundir a estimativa. Branco no branco não comprova má-fé. Não existe garantia de detectar toda injeção.\n\n'
             'PDF escaneado exige OCR/revisão: este app não executa OCR. A ordem do texto pode ser imperfeita em colunas.\n\n'
             'Nenhum comando do PDF é executado. Se integrar uma IA, trate o texto como dados não confiáveis, sem ferramentas, segredos ou poder de alterar critérios. Relatórios também contêm dados não confiáveis.\n\n'
             'Limites: 15 MB por arquivo, páginas/tempo configuráveis, 20 milhões de pixels por página, 100 URLs por manifesto. Use ambiente isolado e bibliotecas atualizadas para PDFs externos.'
@@ -99,7 +126,7 @@ class App:
     def field(self, parent, label, var, browse=False, compact=False):
         """Cria um campo consistente; compactos mantêm rótulo e valor na mesma linha."""
         row = ttk.Frame(parent); row.pack(fill='x',pady=4)
-        ttk.Label(row,text=label,width=35 if compact else 0).pack(side='left' if compact else 'top',anchor='w')
+        ttk.Label(row,text=label,width=COMPACT_LABEL_WIDTH if compact else 0).pack(side='left' if compact else 'top',anchor='w')
         ttk.Entry(row,textvariable=var,width=12 if compact else 65).pack(side='left',fill=None if compact else 'x',expand=not compact)
         if browse:
             ttk.Button(row,text='Escolher',command=lambda:var.set(filedialog.askdirectory() or var.get())).pack(side='left',padx=5)

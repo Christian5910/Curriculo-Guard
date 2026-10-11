@@ -1,3 +1,15 @@
+# Versão 2.5
+
+- **Ícone do aplicativo:** nova pasta `assets/` com `icon.svg` (fonte), PNGs de 16 a 512 px, `icon.ico` e `make_icons.py`, que os gera só com PyMuPDF. Uma folha de currículo com um escudo verde com check. O cabeçalho da janela agora mostra o ícone e o nome no canto superior esquerdo, e o ícone também vai para a janela e a barra de tarefas. Se a pasta `assets/` faltar, o app abre normalmente, sem ícone.
+- **Primeira execução da interface com Tk real** (Xvfb; Tk 8.6 e 9.0). Nenhuma exceção em callbacks; lote, revisão, prévia, CSV e configuração funcionaram. Defeitos encontrados e corrigidos:
+  - o rótulo "Tempo máximo por análise em segundos (5–180)" aparecia cortado em "(5-": os rótulos dos campos compactos tinham largura fixa de 35 caracteres e este tem 45; agora todos usam 46 e as caixas ficam alinhadas;
+  - as mensagens de erro do motor diziam "Opacidade máxima", "Cobertura máxima" e "Tempo limite por arquivo", enquanto a interface diz "Opacidade mínima", "Cobertura suspeita" e "Tempo máximo por análise"; agora são idênticas, com teste que compara os dois;
+  - textos desatualizados: a caixa "Estimar contraste com fundo local" passou a "Medir contraste e tinta visível contra o fundo real", e a ajuda agora cita a reanálise da quarentena, a definição de duplicado e a verificação de tinta.
+- Novo `test_gui.py`: roda a interface real (lote completo, revisão, exportação, configuração, validação, cabeçalho, rótulos e alinhamento). É ignorado sem Tkinter ou tela; com `REQUIRE_GUI_TESTS=1` (usado na CI Linux) a ausência vira falha. Testes de assets: PNGs, `.ico` e em dia com o SVG.
+- CI: instala o Xvfb no Linux e exige os testes de interface; o pyflakes passa a cobrir todos os arquivos.
+- Capturas de tela da interface em `docs/img/` (Linux, tema padrão do Tk).
+- 85 testes passaram (79 sem tela).
+
 # Versão 2.4
 
 - **Verificação de tinta visível:** como o motor já renderiza a página com e sem texto, cada trecho agora precisa deixar diferença visível entre as duas imagens. Antes, texto com cor declarada legível mas invisível na prática (modo de mesclagem `Screen`/`Lighten`/`Difference` sobre um fundo desenhado, ou preenchimento por padrão branco) passava sem alerta e entrava no TXT. Em 539 trechos legítimos medidos (LibreOffice, wkhtmltopdf, reportlab e layouts sintéticos), o de menor tinta marcou 89 de 255, contra o limite de 16. Limite conhecido: se outro texto visível ocupa o mesmo lugar, a tinta é atribuída a ele.

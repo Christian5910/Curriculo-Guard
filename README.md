@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon_128.png" width="96" alt="Ícone do Currículo Guard: folha de currículo com um escudo verde com check">
+</p>
+
 # 🛡️ Currículo Guard
 
 **Uma camada de inspeção entre o currículo em PDF e a avaliação automatizada.**
@@ -108,7 +112,7 @@ Com as dependências instaladas:
 python -m unittest discover -v
 ```
 
-A versão 2.4 passou por **73 testes automatizados**, cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV e downloads simulados. O motor de análise importa e roda sem Tkinter.
+A versão 2.5 passou por **85 testes automatizados** (6 deles usam a interface real e são ignorados em ambientes sem tela), cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV e downloads simulados. O motor de análise importa e roda sem Tkinter.
 
 A interface ainda não foi validada visualmente no ambiente de desenvolvimento. Downloads foram testados com respostas simuladas, não com um servidor externo real.
 
@@ -133,8 +137,9 @@ Use uma instância por pasta de saída. O histórico é um registro local, sem a
 | `engine.py` | Motor, sem interface: análise do PDF, downloads, roteamento e processamento em lote. |
 | `workflow.py` | Persistência, hashes, revisão humana e exportação. |
 | `review_ui.py` | Fila de revisão e prévia rasterizada. |
+| `assets/` | Ícone do aplicativo: `icon.svg` (fonte), PNGs, `icon.ico` e `make_icons.py`, que os gera. |
 | `evaluation/` | Corpus de frases e scripts que reproduzem os números deste README. |
-| `test_app.py` / `test_revision.py` | Testes automatizados. |
+| `test_app.py` / `test_revision.py` / `test_gui.py` | Testes automatizados; `test_gui.py` roda a interface real. |
 | `.github/workflows/tests.yml` | Integração contínua: testes e avaliação em Linux e Windows. |
 | `requirements-dev.txt` | Dependências para desenvolver e testar. |
 | `docs/GUIA_DE_USO.md` | Guia detalhado, limites e observações operacionais. |
@@ -151,6 +156,15 @@ resultado = run_batch({'root': 'triagem'}, local='curriculos/')
 print(dict(resultado))   # ex.: {'aprovados': 12, 'verificacao_humana': 3}
 ```
 
+## 🖼️ Interface
+
+<p align="center">
+  <img src="docs/img/entrada.png" width="48%" alt="Aba Entrada, com o ícone e o nome no cabeçalho">
+  <img src="docs/img/revisao.png" width="48%" alt="Aba Revisão humana, com um documento sinalizado selecionado">
+</p>
+
+Capturas feitas em Linux, com o tema padrão do Tk; no Windows e no macOS o visual dos controles muda. Para regenerar o ícone depois de editar `assets/icon.svg`: `python assets/make_icons.py`.
+
 ## 📊 Avaliação reproduzível
 
 Os números deste README podem ser reproduzidos (na raiz do projeto, com `pip install -r requirements-dev.txt`):
@@ -161,6 +175,6 @@ python -m evaluation.run_pdfs         # ataques escondidos, injeção visível e
 python -m evaluation.run_realistic    # PDFs de reportlab (e LibreOffice/wkhtmltopdf, se instalados)
 ```
 
-Resultado da versão 2.4: frases do conjunto inédito, **22 de 30** detectadas contra 4 de 30 da v2.0, com 0 falsos positivos em 40 linhas legítimas; 24 de 24 ataques escondidos, 11 de 11 sinalizações e 11 de 11 layouts legítimos nos PDFs sintéticos. O conjunto de desenvolvimento serve apenas como teste de regressão, porque os padrões foram ajustados olhando para ele; só o conjunto inédito mede generalização. Detalhes em `evaluation/README.md`. A integração contínua roda esses scripts com `--check` e falha se a qualidade piorar.
+Resultado da versão 2.5: frases do conjunto inédito, **22 de 30** detectadas contra 4 de 30 da v2.0, com 0 falsos positivos em 40 linhas legítimas; 24 de 24 ataques escondidos, 11 de 11 sinalizações e 11 de 11 layouts legítimos nos PDFs sintéticos. O conjunto de desenvolvimento serve apenas como teste de regressão, porque os padrões foram ajustados olhando para ele; só o conjunto inédito mede generalização. Detalhes em `evaluation/README.md`. A integração contínua roda esses scripts com `--check` e falha se a qualidade piorar.
 
 O código está comentado em português. Para contribuir, descreva o caso observado, use um PDF sintético sem dados pessoais e adicione um teste quando a mudança corrigir um comportamento relevante.

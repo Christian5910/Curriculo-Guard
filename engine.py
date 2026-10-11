@@ -16,7 +16,7 @@ import requests
 import pymupdf
 import numpy as np
 
-APP_VERSION = '2.4'
+APP_VERSION = '2.5'
 INK_MIN = 16   # menor diferença (0–255) entre a página com e sem o trecho para considerá-lo visível
 FOLDERS = ['aprovados','verificacao_humana','rejeitados','duplicados','quarentena','relatorios','originais']
 # Só destinos de análise concluída contam como "já visto"; quarentena pode ser falha transitória.
@@ -606,10 +606,10 @@ def manifest_urls(url):
 
 
 # Limites aceitos para os parâmetros editáveis (os mesmos exibidos na interface).
-SETTING_LIMITS = (('reference_dpi','DPI de referência',36,600),('analysis_dpi','DPI de renderização',72,300),
-                  ('min_px','Fonte mínima em px',1,30),('timeout','Tempo limite por arquivo',5,180))
-OPTION_LIMITS = (('contrast_limit','Contraste mínimo',1,21),('opacity_limit','Opacidade máxima',0,1),
-                 ('overlap_limit','Cobertura máxima',0,1),('max_pages','Máximo de páginas',1,100))
+SETTING_LIMITS = (('reference_dpi','DPI referência',36,600),('analysis_dpi','DPI renderização',72,300),
+                  ('min_px','Fonte mínima em px',1,30),('timeout','Tempo máximo por análise',5,180))
+OPTION_LIMITS = (('contrast_limit','Contraste mínimo',1,21),('opacity_limit','Opacidade mínima',0,1),
+                 ('overlap_limit','Cobertura suspeita',0,1),('max_pages','Máximo de páginas',1,100))
 
 def validate_params(params):
     """Valida os parâmetros de um lote (os mesmos que `Pipeline` recebe); levanta ValueError."""

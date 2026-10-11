@@ -1,0 +1,4 @@
+# Dependências para desenvolver e testar (instala também as de execução).
+-r requirements.txt
+reportlab>=4.0      # gera currículos de teste com um produtor de PDF independente
+pyflakes>=3.0       # detecta imports sem uso e nomes indefinidos

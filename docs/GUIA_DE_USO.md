@@ -1,4 +1,4 @@
-# Currículo Guard — versão 2.4
+# Currículo Guard — versão 2.5
 
 Aplicativo desktop Python 3.11+ com Tkinter. Código comentado em português. Extraia todos os arquivos do ZIP juntos: app.py depende de engine.py, workflow.py e review_ui.py.
 
@@ -58,7 +58,7 @@ Execute PDFs externos em ambiente isolado, com dependências atualizadas. Valida
 python -m unittest -v
 ```
 
-73 testes automatizados: casos originais de filtragem; preservação de relatórios em duplicatas e reanálises; decisões com histórico; revogação do TXT; alteração/caminho do PDF; campos auxiliares; normalização Unicode; ações ativas; limites de páginas e tempo; geração real de PNG de prévia; CSV; arquivos corrompidos; downloads simulados e limpeza de temporários; texto fora da área visível; fundo heterogêneo; alteração entre análise/cópia e symlinks de fuga; contraste contra o fundo real (texto sobre caixa do mesmo tom, réguas, selos, páginas rotacionadas), cobertura fragmentada, gradientes, frases de injeção e legítimas, letras separadas e homóglifos; reanálise de quarentena; importação sem Tkinter; manifesto sem proxy de ambiente; relatórios malformados; motor sem Tkinter, `run_batch` e `validate_params`.
+85 testes automatizados: casos originais de filtragem; preservação de relatórios em duplicatas e reanálises; decisões com histórico; revogação do TXT; alteração/caminho do PDF; campos auxiliares; normalização Unicode; ações ativas; limites de páginas e tempo; geração real de PNG de prévia; CSV; arquivos corrompidos; downloads simulados e limpeza de temporários; texto fora da área visível; fundo heterogêneo; alteração entre análise/cópia e symlinks de fuga; contraste contra o fundo real (texto sobre caixa do mesmo tom, réguas, selos, páginas rotacionadas), cobertura fragmentada, gradientes, frases de injeção e legítimas, letras separadas e homóglifos; reanálise de quarentena; importação sem Tkinter; manifesto sem proxy de ambiente; relatórios malformados; motor sem Tkinter, `run_batch` e `validate_params`; ícone e cabeçalho; rótulos sem corte e alinhados; fluxo completo pela interface real (lote, revisão, CSV, configuração).
 
 Interface Tkinter ainda sem validação visual neste ambiente. Downloads foram testados com respostas simuladas, não com servidor externo real. Os testes não comprovam detecção de todos os ataques.
 
@@ -68,8 +68,9 @@ Interface Tkinter ainda sem validação visual neste ambiente. Downloads foram t
 - engine.py: motor sem interface (análise, download, roteamento e lote); pode ser usado em scripts.
 - workflow.py: gravação atômica, hashes, revisão e exportação.
 - review_ui.py: fila de revisão e prévia.
+- assets/: ícone do aplicativo (icon.svg é a fonte; make_icons.py gera os PNGs e o .ico).
 - evaluation/: corpus de frases e scripts que reproduzem as medições (`python -m evaluation.run_phrases`, `run_pdfs`, `run_realistic`).
-- test_app.py e test_revision.py: testes.
+- test_app.py, test_revision.py e test_gui.py: testes (test_gui.py usa a interface real e é ignorado sem tela).
 - .github/workflows/tests.yml e requirements-dev.txt: integração contínua e dependências de desenvolvimento.
 - requirements.txt: dependências.
 
