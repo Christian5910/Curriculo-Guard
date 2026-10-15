@@ -116,6 +116,8 @@ class ReviewPanel(ttk.Frame if ttk else object):
         try:
             _,data=self.selected()
             lines=[f"Status: {data.get('status')} | SHA-256: {data.get('sha256','ausente')}"]
+            for key,label in (('reason','Motivo'),('error','Erro'),('duplicate_of','Duplicado de')):
+                if data.get(key): lines.append(f"{label}: {str(data[key])[:500]}")
             for alert in data.get('alerts',[]):
                 lines.append(f"Página {alert.get('page','—')} | {alert.get('type')}: {alert.get('detail','')}\nTrecho: {alert.get('sample','')}")
             for event in data.get('history',[]):

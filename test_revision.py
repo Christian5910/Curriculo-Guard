@@ -105,7 +105,11 @@ class RevisionTests(unittest.TestCase):
 class FakeResponse:
     """Resposta HTTP simulada, sem acesso à rede."""
     status_code=200
-    def __init__(self,chunks):self.chunks=chunks
+    def __init__(self,chunks):
+        self.chunks=list(chunks)
+        class Raw:   # o motor lê com read1 (como a resposta real do urllib3 2.2+)
+            def read1(raw,size,decode_content=True):return self.chunks.pop(0) if self.chunks else b''
+        self.raw=Raw()
     def __enter__(self):return self
     def __exit__(self,*args):pass
     def raise_for_status(self):pass
@@ -235,5 +239,58 @@ class ExtraRegressionTests(unittest.TestCase):
         self.assertEqual(sum(result.values()),0); self.assertEqual(events[-1],('log','Interrompido.'))
         with self.assertRaises(ValueError): run_batch({'root':str(self.root/'saida3')},local=str(self.root/'nao_existe'))
         with self.assertRaises(ValueError): run_batch({'root':str(self.root/'saida4'),'timeout':1},local=str(inbox))
+
+    def test_download_honors_deadline_and_cancel_even_when_the_server_drips_bytes(self):
+        import time
+        class Raw:
+            def read1(self,size,decode_content=True): time.sleep(.05); return b'x'        # 1 byte a cada 50 ms, para sempre
+        class Response:
+            status_code=200; raw=Raw()
+            def __enter__(self): return self
+            def __exit__(self,*a): return False
+            def raise_for_status(self): pass
+        class Session:
+            trust_env=True
+            def __enter__(self): return self
+            def __exit__(self,*a): return False
+            def get(self,*a,**k): return Response()
+        dest=self.root/'d.pdf'
+        with patch('engine.requests.Session',Session),patch('engine.is_public_https'):
+            with patch('engine.DOWNLOAD_DEADLINE_S',.6):
+                start=time.monotonic()
+                with self.assertRaises(TimeoutError): download_pdf('https://h.example/a.pdf',dest)
+                self.assertLess(time.monotonic()-start,3)
+            cancel=threading.Event(); threading.Timer(.3,cancel.set).start(); start=time.monotonic()
+            with self.assertRaisesRegex(ValueError,'cancelado'): download_pdf('https://h.example/a.pdf',dest,cancel)
+            self.assertLess(time.monotonic()-start,3)
+        self.assertEqual([p.name for p in self.root.iterdir() if p.name.endswith('.part')],[]); self.assertFalse(dest.exists())
+    def test_download_accepts_pdf_header_after_a_bom(self):
+        import io
+        payload=b'\xef\xbb\xbf\n%PDF-1.4\n'+b'0'*50
+        class Raw:
+            def __init__(self): self.buffer=io.BytesIO(payload)
+            def read1(self,size,decode_content=True): return self.buffer.read(size)
+        class Response:
+            status_code=200
+            def __init__(self): self.raw=Raw()
+            def __enter__(self): return self
+            def __exit__(self,*a): return False
+            def raise_for_status(self): pass
+        class Session:
+            trust_env=True
+            def __enter__(self): return self
+            def __exit__(self,*a): return False
+            def get(self,*a,**k): return Response()
+        dest=self.root/'bom.pdf'
+        with patch('engine.requests.Session',Session),patch('engine.is_public_https'): download_pdf('https://h.example/a.pdf',dest)
+        self.assertEqual(dest.read_bytes(),payload)
+    def test_csv_neutralizes_leading_tab_and_carriage_return(self):
+        import csv
+        reports=self.root/'o'/'relatorios'; reports.mkdir(parents=True)
+        for index,name in enumerate(('\tTAB.pdf','\rCR.pdf','=1+1.pdf','  @x.pdf','normal.pdf')):
+            (reports/f'r{index}.json').write_text(json.dumps({'status':'aprovados','original_name':name,'alerts':[],'history':[]}))
+        target=self.root/'x.csv'; ReviewStore(self.root/'o').export_csv(target)
+        cells=[row[0] for row in csv.reader(open(target,encoding='utf-8',newline=''))][1:]
+        self.assertTrue(all(c.startswith("'") for c in cells if c!='normal.pdf'),cells); self.assertIn('normal.pdf',cells)
 
 if __name__=='__main__':unittest.main()

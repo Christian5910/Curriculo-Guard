@@ -1,3 +1,4 @@
 PyMuPDF>=1.26.6,<2
 numpy>=1.26,<3
 requests>=2.32.3,<3
+urllib3>=2.2,<3     # read1(): o download confere prazo e cancelamento a cada chegada de bytes

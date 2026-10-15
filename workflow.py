@@ -131,7 +131,7 @@ class ReviewStore:
         """Exporta inventário sem texto do currículo e neutraliza fórmulas CSV."""
         def cell(value):
             value = str(value)
-            if value.lstrip().startswith(('=', '+', '-', '@')): return "'" + value
+            if value.lstrip().startswith(('=', '+', '-', '@')) or value[:1] in ('\t', '\r'): return "'" + value
             return value
         import io
         stream = io.StringIO(newline='')

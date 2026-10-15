@@ -1,3 +1,22 @@
+# Versão 2.6
+
+Resultado de uma bateria nova (segurança, robustez, alfabetos, escala, documentação executável, comparação com um segundo renderizador). Defeitos confirmados e corrigidos:
+
+- **Download:** um servidor que "gotejava" 1 byte por segundo bloqueava o laço de leitura por horas, ignorando o prazo de 90 s e o botão Interromper (45 s depois do clique o download seguia travado). A leitura agora usa `read1` e confere prazo e cancelamento a cada chegada de bytes: o cancelamento responde em ~3 s e o prazo vale. Exige `urllib3>=2.2`. O cancelamento durante um fluxo normal caiu de 6,4 s para 1,5 s.
+- **Memória:** um PDF de 14 KB (uma string de 14,5 MB comprime a quase nada) fazia o sistema matar o processo de análise por falta de memória. O processo filho agora tem teto de 2 GB de memória virtual (Linux e macOS; documentos normais usam menos de 450 MB), uma thread numérica e mensagem de erro clara. A bomba de imagem de 30000x30000 caiu de 1,8 GB para 966 MB.
+- **Links simbólicos na pasta de entrada** copiavam arquivos de fora (por exemplo, um segredo ou um PDF privado) para a pasta de saída e o texto do PDF privado ia para os relatórios. Agora são ignorados, e `Pipeline.process` os recusa.
+- **PDF sem relatório** (queda entre a cópia e a gravação) virava "duplicado" de um arquivo nunca avaliado, e o currículo ficava sem análise. Agora só conta como já visto o PDF que tem relatório.
+- **PDF com BOM ou linhas em branco antes de `%PDF-`** (o erro clássico de PHP) ia para a quarentena sem motivo, embora Acrobat e MuPDF o abram. O cabeçalho é aceito nos primeiros 1024 bytes, também no download.
+- **Verificação de tinta por caractere:** cobrir 74% de uma linha deixava o payload coberto entrar no texto, porque a cauda visível "salvava" o trecho inteiro. Agora cada caractere sem tinta visível é removido do texto e sinalizado (custo de ~35% no caso mais denso: 3,4 s para 4,6 s em 35 páginas).
+- **Destaque semitransparente** desenhado depois do texto gerava `possivel_sobreposicao` (falso positivo): texto que continua legível na página renderizada não é mais tratado como escondido; coberturas de 80% ou mais de opacidade continuam sendo.
+- **Unicode:** qualquer caractere invisível gerava `controles_unicode`, o que mandaria para a revisão currículos em persa, hindi, hebraico, árabe e os com emoji (👩‍💻). Agora só os suspeitos geram alerta. Mensagens escritas com tags Unicode invisíveis ("ASCII smuggling") são decodificadas antes da busca de frases.
+- **URLs:** multicast (`224.0.0.1`) passava na validação, e espaços e caracteres de controle não eram rejeitados.
+- **CSV:** células começando com TAB ou CR não eram neutralizadas.
+- **Pastas extras:** a validação aceitava nomes que quebram no Windows (`CON`, `NUL`, só espaço ou hífen, espaço no fim) e nomes iguais aos das pastas fixas.
+- **Interface:** o painel de detalhes não mostrava o motivo da quarentena (`assinatura inválida`, erro da análise, duplicado de).
+- Verificado sem problema: fontes Type 3, 9 alfabetos, texto rotacionado, marca d'água, PDFs malformados (laços, aninhamento, 300 mil objetos), `kill -9` no meio do lote, determinismo entre sementes de hash, regex sem backtracking catastrófico, invariância ao DPI de renderização, acordo com o pdfium em todos os cenários escondidos.
+- 3 cenários escondidos, 1 de sinalização e 2 legítimos novos na avaliação (27/27, 12/12, 13/13). 104 testes passaram (98 sem tela).
+
 # Versão 2.5
 
 - **Ícone do aplicativo:** nova pasta `assets/` com `icon.svg` (fonte), PNGs de 16 a 512 px, `icon.ico` e `make_icons.py`, que os gera só com PyMuPDF. Uma folha de currículo com um escudo verde com check. O cabeçalho da janela agora mostra o ícone e o nome no canto superior esquerdo, e o ícone também vai para a janela e a barra de tarefas. Se a pasta `assets/` faltar, o app abre normalmente, sem ícone.

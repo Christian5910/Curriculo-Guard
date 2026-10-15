@@ -16,7 +16,12 @@ import requests
 import pymupdf
 import numpy as np
 
-APP_VERSION = '2.5'
+APP_VERSION = '2.6'
+CHILD_MEMORY_MB = 2048     # teto de memória virtual do processo de análise (POSIX); PDFs normais usam < 450 MB
+DOWNLOAD_DEADLINE_S = 90   # prazo total de um download, mesmo que o servidor "goteje" bytes
+LEGIBLE_RATIO = 3.0        # contraste (na página já renderizada) a partir do qual o texto é legível
+WINDOWS_RESERVED = {'con','prn','aux','nul'} | {f'com{i}' for i in range(1,10)} | {f'lpt{i}' for i in range(1,10)}
+SINGLE_THREAD_VARS = ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS')
 INK_MIN = 16   # menor diferença (0–255) entre a página com e sem o trecho para considerá-lo visível
 FOLDERS = ['aprovados','verificacao_humana','rejeitados','duplicados','quarentena','relatorios','originais']
 # Só destinos de análise concluída contam como "já visto"; quarentena pode ser falha transitória.
@@ -101,40 +106,71 @@ SQUASHED_PHRASES = (
     'ignoreasinstrucoesanteriores', 'desconsidereasinstrucoesanteriores', 'esquecatudo',
 )
 
+def _is_public_ip(text):
+    """IP roteável na internet pública (multicast, privado, local e reservado ficam de fora)."""
+    ip = ipaddress.ip_address(text.split('%')[0])
+    return ip.is_global and not ip.is_multicast
+
+
+def has_pdf_header(path):
+    """Aceita '%PDF-' nos primeiros 1024 bytes, como Acrobat e MuPDF (servidores às vezes antepõem BOM ou linhas em branco)."""
+    with Path(path).open('rb') as stream: return b'%PDF-' in stream.read(1024)
+
+
+def valid_folder_name(name, reserved=()):
+    """Nome de pasta aceito em Windows, macOS e Linux: sem separadores, sem ser só espaço/hífen,
+    sem espaço nas pontas, sem nome reservado do Windows e sem colidir com pastas fixas."""
+    return bool(isinstance(name, str) and re.fullmatch(r'[\w -]{1,40}', name) and re.search(r'\w', name)
+                and name == name.strip() and name.casefold() not in WINDOWS_RESERVED
+                and name.casefold() not in {r.casefold() for r in reserved})
+
+
 def is_public_https(url):
     """Valida protocolo e IPs públicos; exige política de saída contra DNS rebinding."""
+    if any(ord(ch) <= 32 or ord(ch) == 127 for ch in url): raise ValueError('URL com espaços ou caracteres de controle.')
     p = urlparse(url)
     if p.scheme != 'https' or not p.hostname or p.username or p.password or p.port not in (None, 443):
         raise ValueError('Somente HTTPS público na porta 443 é permitido.')
     addresses = socket.getaddrinfo(p.hostname, 443, type=socket.SOCK_STREAM)
-    if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
+    if not addresses or any(not _is_public_ip(a[4][0]) for a in addresses):
         raise ValueError('Destino privado, local ou não público bloqueado.')
     return url
+
+def _read_arrived(response):
+    """Lê o que já chegou do servidor, sem esperar completar um bloco.
+
+    `iter_content(65536)` bloqueia até juntar 64 KB: um servidor que "goteja" 1 byte por
+    segundo seguraria o laço por horas, ignorando o prazo e o botão Interromper.
+    `read1` (urllib3 2.2+) devolve assim que chega algo, então o laço confere o prazo a cada chegada.
+    """
+    return response.raw.read1(65536, decode_content=True)
+
 
 def download_pdf(url, dest, cancel=None):
     """Baixa em temporário e só publica PDF completo; pode cancelar por bloco."""
     is_public_https(url)
     dest = Path(dest)
     partial = dest.with_name(dest.name + '.' + uuid.uuid4().hex + '.part')
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + DOWNLOAD_DEADLINE_S
     try:
         # Desabilitar proxies de ambiente reduz destinos inesperados.
         with requests.Session() as session:
             session.trust_env = False
-            with session.get(url, stream=True, timeout=(8, 15), allow_redirects=False,
+            with session.get(url, stream=True, timeout=(8, 10), allow_redirects=False,
                              headers={'User-Agent':f'CurriculoGuard/{APP_VERSION}'}) as response:
                 if 300 <= response.status_code < 400: raise ValueError('Redirecionamento bloqueado.')
                 response.raise_for_status()
                 total = 0
                 with partial.open('wb') as stream:
-                    for chunk in response.iter_content(65536):
+                    while True:
                         if cancel is not None and cancel.is_set(): raise ValueError('Download cancelado.')
-                        if time.monotonic() > deadline: raise TimeoutError('Download excedeu 90 segundos.')
+                        if time.monotonic() > deadline: raise TimeoutError(f'Download excedeu {DOWNLOAD_DEADLINE_S} segundos.')
+                        chunk = _read_arrived(response)
+                        if not chunk: break
                         total += len(chunk)
                         if total > MAX_BYTES: raise ValueError('PDF excede 15 MB.')
                         stream.write(chunk)
-        with partial.open('rb') as stream:
-            if stream.read(5) != b'%PDF-': raise ValueError('Arquivo não tem assinatura PDF.')
+        if not has_pdf_header(partial): raise ValueError('Arquivo não tem assinatura PDF.')
         os.replace(partial, dest)
     finally:
         partial.unlink(missing_ok=True)
@@ -150,8 +186,38 @@ _CONFUSABLES = str.maketrans({
 })
 
 
+_TAG_RUN = re.compile('[\U000E0020-\U000E007E]+')
+_FLAG_TAGS = re.compile('\U0001F3F4[\U000E0020-\U000E007E]+\U000E007F')   # bandeiras de subdivisão (🏴) usam tags legitimamente
+# Controles invisíveis de uso comum em línguas e emoji; só valem alerta em contexto suspeito.
+_COMMON_FORMAT = set('\u200b\u200c\u200d\u200e\u200f\u061c\u2060\ufeff\u00ad')
+
+
+def suspicious_format_characters(text):
+    """Caracteres invisíveis (categoria Cf) que merecem revisão.
+
+    Ignora usos comuns: LRM/RLM em hebraico e árabe, ZWNJ/ZWJ em persa, hindi e emoji, hífen suave, BOM.
+    São suspeitos: bidi override/isolate, tags Unicode, operadores invisíveis, qualquer Cf incomum,
+    sequências de 3 ou mais, e invisíveis entre duas letras/dígitos ASCII (comum em ofuscação).
+    """
+    text = _FLAG_TAGS.sub('', text)
+    found, i, size = [], 0, len(text)
+    while i < size:
+        if unicodedata.category(text[i]) != 'Cf': i += 1; continue
+        j = i
+        while j < size and unicodedata.category(text[j]) == 'Cf': j += 1
+        run, before, after = text[i:j], text[i-1] if i else '', text[j] if j < size else ''
+        uncommon = [c for c in run if c not in _COMMON_FORMAT]
+        between_ascii = before.isascii() and before.isalnum() and after.isascii() and after.isalnum()
+        if uncommon or len(run) >= 3 or (between_ascii and any(c != '\u00ad' for c in run)):
+            found.extend(f'U+{ord(c):04X}' for c in (uncommon or run))
+        i = j
+    return sorted(set(found))
+
+
 def _prepare_instruction_text(text):
-    """NFKC, confusáveis cirílicos/gregos e remoção de controles invisíveis."""
+    """Tags Unicode decodificadas, NFKC, confusáveis cirílicos/gregos e remoção de controles invisíveis."""
+    # "ASCII smuggling": mensagem escrita com tags invisíveis (U+E0020–U+E007E) vira texto legível para a busca.
+    text = _TAG_RUN.sub(lambda m: ' ' + ''.join(chr(ord(c) - 0xE0000) for c in m.group()) + ' ', text)
     text = unicodedata.normalize('NFKC', text).translate(_CONFUSABLES)
     return ''.join(c for c in text if unicodedata.category(c) != 'Cf')
 
@@ -273,6 +339,19 @@ def text_free_image(scratch, index, dpi):
     except Exception:
         return None
 
+def ink_difference(image, clean, rect, scale):
+    """Diferença (0–255) pixel a pixel entre a página com e sem texto, no retângulo do trecho.
+
+    Devolve (diferença, x0, y0) com a origem do recorte, ou None se o retângulo estiver fora da página.
+    Calculada uma vez por trecho e reaproveitada pelas verificações de tinta do trecho e dos caracteres.
+    """
+    h, w = image.shape[:2]
+    x0, y0, x1, y1 = [int(round(v * scale)) for v in rect]
+    x0, x1, y0, y1 = max(0, x0), min(w, x1), max(0, y0), min(h, y1)
+    if x1 <= x0 or y1 <= y0: return None
+    d = np.abs(image[y0:y1, x0:x1].astype(np.int16) - clean[y0:y1, x0:x1].astype(np.int16))
+    return np.maximum(np.maximum(d[..., 0], d[..., 1]), d[..., 2]), x0, y0
+
 def ink_strength(image, clean, rect, scale):
     """Maior diferença (0–255) entre a página com e sem texto dentro do retângulo do trecho.
 
@@ -280,11 +359,8 @@ def ink_strength(image, clean, rect, scale):
     declarada: texto de cor igual ao fundo, em modo de mesclagem que o apaga, com
     padrão de preenchimento invisível ou coberto não deixa diferença alguma.
     """
-    h, w = image.shape[:2]
-    x0, y0, x1, y1 = [int(round(v * scale)) for v in rect]
-    x0, x1, y0, y1 = max(0, x0), min(w, x1), max(0, y0), min(h, y1)
-    if x1 <= x0 or y1 <= y0: return None
-    return int(np.abs(image[y0:y1, x0:x1].astype(np.int16) - clean[y0:y1, x0:x1].astype(np.int16)).max())
+    result = ink_difference(image, clean, rect, scale)
+    return None if result is None else int(result[0].max())
 
 def background_contrast(clean, rect, scale, fg):
     """Razão de contraste entre a cor do texto e cada pixel do fundo real do trecho."""
@@ -303,6 +379,42 @@ def overlap(a, b):
     area = max(0,x1-x0) * max(0,y1-y0)
     base = max(.00001, (a[2]-a[0]) * (a[3]-a[1]))
     return area / base
+
+def legible_columns(image, clean, rect, scale, ratio_min=LEGIBLE_RATIO):
+    """Fração das colunas do trecho em que o texto aparece legível na página já renderizada.
+
+    Compara o contraste entre a página com e sem o texto; um destaque translúcido por cima
+    mantém o texto legível, enquanto uma cobertura opaca (ou quase) o apaga.
+    """
+    h, w = image.shape[:2]
+    x0, y0, x1, y1 = [int(round(v * scale)) for v in rect]
+    x0, x1, y0, y1 = max(0, x0), min(w, x1), max(0, y0), min(h, y1)
+    if x1 <= x0 or y1 <= y0: return 0.0
+    weights = np.array([.2126, .7152, .0722])
+    shown, bare = _LINEAR[image[y0:y1, x0:x1]] @ weights, _LINEAR[clean[y0:y1, x0:x1]] @ weights
+    ratio = (np.maximum(shown, bare) + .05) / (np.minimum(shown, bare) + .05)
+    return float((ratio.max(axis=0) >= ratio_min).mean())
+
+
+def hidden_characters(difference, chars, scale):
+    """Índices dos caracteres de um trecho que não deixaram tinta visível na página renderizada.
+
+    A verificação por trecho inteiro perde a cobertura parcial (uma cauda visível "salva" o trecho
+    todo). Aqui a diferença entre a página com e sem texto (`ink_difference`) vira uma máscara de
+    tinta, e uma tabela de soma acumulada responde, para todos os caracteres de uma vez, se a faixa
+    de cada um tem tinta. Espaços, controles e marcas combinantes não deixam tinta e são ignorados.
+    """
+    if difference is None or not chars: return []
+    diff, x0, y0 = difference; height, width = diff.shape
+    table = np.zeros((height + 1, width + 1), dtype=np.int32)
+    table[1:, 1:] = (diff >= INK_MIN).cumsum(axis=0, dtype=np.int32).cumsum(axis=1, dtype=np.int32)
+    boxes = np.rint(np.array([ch['bbox'] for ch in chars], dtype=float) * scale).astype(int)
+    bx0, bx1 = np.clip(boxes[:, 0] - x0, 0, width), np.clip(boxes[:, 2] - x0, 0, width)
+    by0, by1 = np.clip(boxes[:, 1] - y0, 0, height), np.clip(boxes[:, 3] - y0, 0, height)
+    eligible = np.array([not (c['c'].isspace() or unicodedata.category(c['c']) in ('Cf', 'Mn', 'Me', 'Cc')) for c in chars])
+    inked = table[by1, bx1] - table[by0, bx1] - table[by1, bx0] + table[by0, bx0]
+    return np.flatnonzero(eligible & (bx1 > bx0) & (by1 > by0) & (inked == 0)).tolist()
+
 
 def covered_fraction(box, others, cell=.5):
     """Fração da área de `box` coberta pela UNIÃO dos retângulos `others`.
@@ -389,20 +501,21 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                 box = tr.get('bbox')
                 if 'overlap' in enabled and box and seq >= 0:
                     later = [b for _, b in fills[bisect.bisect_right(fill_order, seq):] if overlap(box, b) > 0]
-                    if later and covered_fraction(box, later) > overlap_limit:
+                    if later and covered_fraction(box, later) > overlap_limit and not (clean is not None and legible_columns(image, clean, box, scale) >= .5):
                         blocked_boxes.append(box)
                         metrics['overlap'] += 1
                         alerts.append({'type':'possivel_sobreposicao','severity':'review','page':pn,'detail':'Objetos posteriores sobre região textual','bbox':list(box)})
             if sum(len(part) for part in inspection_parts) > 1_000_000:
                 raise ValueError('Conteúdo textual excede 1 milhão de caracteres.')
-            raw = page.get_text('dict', sort=True)
+            raw = page.get_text('rawdict', sort=True)
             page_lines = []
             for block in raw['blocks']:
                 if block.get('type') != 0: continue
                 for line in block.get('lines',[]):
                     fragments = []
                     for span in line.get('spans',[]):
-                        t = span.get('text','')
+                        chars = span.get('chars', [])
+                        t = ''.join(c['c'] for c in chars)
                         if not t.strip():
                             fragments.append(t); continue
                         metrics['characters'] += len(t)
@@ -420,11 +533,18 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                             continue
                         if 'contrast' in enabled:
                             fg = rgb(span['color'])
-                            strength = ink_strength(image, clean, span['bbox'], scale) if clean is not None else None
+                            difference = ink_difference(image, clean, span['bbox'], scale) if clean is not None else None
+                            strength = int(difference[0].max()) if difference is not None else None
                             if strength is not None and strength < INK_MIN:
                                 metrics['low_contrast'] += len(t)
                                 alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':'Sem tinta visível na renderização (cor igual ao fundo, modo de mesclagem, padrão ou cobertura)','sample':t[:100],'bbox':list(span['bbox'])})
                                 continue
+                            hidden = hidden_characters(difference, chars, scale)
+                            if hidden:
+                                gone = set(hidden); metrics['low_contrast'] += len(hidden)
+                                alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':f'{len(hidden)} caractere(s) sem tinta visível (cobertos, mesclados ou da cor do fundo)','sample':''.join(chars[k]['c'] for k in hidden)[:100],'bbox':list(span['bbox'])})
+                                t = ''.join(c['c'] for k, c in enumerate(chars) if k not in gone)
+                                if not t.strip(): continue
                             # Plano B (renderização sem texto indisponível): anel único e, se for
                             # heterogêneo, janelas, o que acomoda gradientes suaves.
                             ratios = background_contrast(clean, span['bbox'], scale, fg) if clean is not None else None
@@ -458,8 +578,9 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
             alerts.append({'type':'sem_texto','severity':'review','detail':'OCR ou análise humana necessária'})
         # Examinar também texto descartado e metadados; não entregá-los à IA.
         inspection = '\n'.join(inspection_parts)
-        if any(unicodedata.category(c) == 'Cf' for c in inspection):
-            alerts.append({'type':'controles_unicode','severity':'review','detail':'Controles invisíveis/direcionais encontrados; podem ser legítimos.'})
+        invisible = suspicious_format_characters(inspection)
+        if invisible:
+            alerts.append({'type':'controles_unicode','severity':'review','detail':'Caracteres invisíveis suspeitos: ' + ', '.join(invisible[:8]) + '. Usos comuns em línguas e emoji são ignorados.'})
         if 'commands' in enabled: alerts.extend(instruction_alerts(inspection))
         if doc.embfile_count() > 0:
             alerts.append({'type':'anexos_embutidos','severity':'review','detail':'PDF contém anexos embutidos'})
@@ -486,10 +607,20 @@ def structural_checks(doc, alerts):
             alerts.append({'type':'camadas_opcionais','severity':'review','detail':'Camadas opcionais podem mudar a visibilidade.'})
 
 
+def _limit_memory(megabytes):
+    """Teto de memória virtual do processo de análise (POSIX). No Windows não há equivalente simples; vale só o prazo."""
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (megabytes * 2**20, megabytes * 2**20))
+    except (ImportError, ValueError, OSError): pass
+
+
 def _analyze_child(connection, path, options):
     """Entrada de subprocesso: envia resultado ou erro, sem iniciar Tkinter."""
+    _limit_memory(CHILD_MEMORY_MB)
     try: connection.send(('ok', analyze_pdf(path, **options)))
-    except Exception as exc: connection.send(('error', str(exc)))
+    except MemoryError: connection.send(('error', f'Memória excedeu o limite de análise ({CHILD_MEMORY_MB} MB).'))
+    except Exception as exc: connection.send(('error', str(exc) or type(exc).__name__))
     finally: connection.close()
 
 
@@ -498,8 +629,15 @@ def analyze_isolated(path, options, timeout=45):
     context = multiprocessing.get_context('spawn')
     receiver, sender = context.Pipe(duplex=False)
     process = context.Process(target=_analyze_child,args=(sender,str(path),options),daemon=True)
+    saved = {name: os.environ.get(name) for name in SINGLE_THREAD_VARS}
+    for name in SINGLE_THREAD_VARS: os.environ.setdefault(name, '1')   # evita reservar memória virtual por thread numérica
     try:
-        process.start(); sender.close()
+        try: process.start()
+        finally:
+            for name, value in saved.items():
+                if value is None: os.environ.pop(name, None)
+                else: os.environ[name] = value
+        sender.close()
         if not receiver.poll(timeout): raise TimeoutError(f'Análise excedeu {timeout}s.')
         try: status, payload = receiver.recv()
         except EOFError as exc: raise RuntimeError('Processo de análise encerrou sem resultado.') from exc
@@ -522,30 +660,31 @@ class Pipeline:
         self.analysis_options = analysis_options or {}
         self.routes = routes or {}
         self.reprocess, self.timeout = reprocess, timeout
+        for name in extra:
+            if not valid_folder_name(name, FOLDERS): raise ValueError('Nome de pasta inválido: '+str(name))
         for name in FOLDERS + list(extra):
-            if not re.fullmatch(r'[\w -]{1,40}', name) or name in ('.','..'):
-                raise ValueError('Nome de pasta inválido: '+name)
             folder = self.root / name
             if not folder.resolve().is_relative_to(self.root):
                 raise ValueError('Pasta de saída aponta para fora do diretório: '+name)
             folder.mkdir(parents=True, exist_ok=True)
         self.hashes = {}
         for file in self.root.rglob('*.pdf'):
-            if not file.is_symlink() and file.parent.name in INDEXED:
+            # Só conta como "já visto" o PDF que tem relatório: sem ele (queda entre a cópia e a gravação) nunca foi avaliado.
+            if not file.is_symlink() and file.parent.name in INDEXED and (self.root / 'relatorios' / (file.stem + '.json')).is_file():
                 try: self.hashes[sha256_file(file)] = str(file)
                 except OSError: pass
 
     def process(self, source):
         """Classifica um arquivo; qualquer falha de análise impede liberação."""
         source = Path(source)
+        if source.is_symlink(): raise ValueError('Link simbólico recusado: ' + source.name)
         if source.stat().st_size > MAX_BYTES:
             return self._move(source,'quarentena',{'reason':'arquivo muito grande'})
         digest = sha256_file(source)
         if digest in self.hashes and not self.reprocess:
             return self._move(source,'duplicados',{'reason':'hash duplicado','duplicate_of':self.hashes[digest]})
         try:
-            with source.open('rb') as stream: header = stream.read(5)
-            if header != b'%PDF-':
+            if not has_pdf_header(source):
                 return self._move(source,'quarentena',{'reason':'assinatura inválida'})
             result = analyze_isolated(source, dict(reference_dpi=self.reference_dpi,analysis_dpi=self.analysis_dpi,min_px=self.min_px,**self.analysis_options), self.timeout)
             # Bloqueio documental impede ingestão automática.
@@ -623,7 +762,7 @@ def validate_params(params):
     check(params, SETTING_LIMITS)
     check(params.get('analysis_options') or {}, OPTION_LIMITS)
     for name in params.get('extra', ()):
-        if not re.fullmatch(r'[\w -]{1,40}', name): raise ValueError('Pasta extra inválida: ' + name)
+        if not valid_folder_name(name, FOLDERS): raise ValueError('Pasta extra inválida: ' + str(name))
 
 
 def run_batch(params, url='', local='', recursive=False, cancel=None, report=None):
@@ -640,8 +779,10 @@ def run_batch(params, url='', local='', recursive=False, cancel=None, report=Non
     if local:
         folder = Path(local).resolve()
         if not folder.is_dir(): raise ValueError('Pasta de origem inválida.')
-        candidates = folder.rglob('*') if recursive else folder.iterdir()
-        sources.extend(p for p in candidates if p.is_file() and p.suffix.lower() == '.pdf' and pipe.root not in p.resolve().parents)
+        candidates = [p for p in (folder.rglob('*') if recursive else folder.iterdir()) if p.suffix.lower() == '.pdf' and p.is_file()]
+        for p in candidates:
+            if p.is_symlink() or not p.resolve().is_relative_to(folder): report('log', f'{p.name}: ignorado (link simbólico ou fora da pasta de origem)')
+        sources.extend(p for p in candidates if not p.is_symlink() and p.resolve().is_relative_to(folder) and pipe.root not in p.resolve().parents)
     for link in (manifest_urls(url) if url else []):
         if cancel.is_set(): break
         dest = pipe.root / 'originais' / ('download_' + uuid.uuid4().hex + '.pdf')

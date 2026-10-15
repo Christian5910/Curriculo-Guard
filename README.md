@@ -112,7 +112,7 @@ Com as dependências instaladas:
 python -m unittest discover -v
 ```
 
-A versão 2.5 passou por **85 testes automatizados** (6 deles usam a interface real e são ignorados em ambientes sem tela), cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV e downloads simulados. O motor de análise importa e roda sem Tkinter.
+A versão 2.6 passou por **104 testes automatizados** (6 deles usam a interface real e são ignorados em ambientes sem tela), cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV e downloads simulados. O motor de análise importa e roda sem Tkinter.
 
 A interface ainda não foi validada visualmente no ambiente de desenvolvimento. Downloads foram testados com respostas simuladas, não com um servidor externo real.
 
@@ -121,6 +121,12 @@ A interface ainda não foi validada visualmente no ambiente de desenvolvimento. 
 - A detecção é **heurística**: pode produzir falsos positivos e falsos negativos.
 - A detecção de frases de injeção cobre formulações comuns em português e inglês. Em um conjunto de 30 frases novas, escritas depois dos padrões, detectou 22 (73%); em 40 frases legítimas de currículo, nenhuma foi sinalizada. Variações criativas, outros idiomas e paráfrases passam.
 - Não há OCR integrado; PDFs escaneados precisam de outro fluxo de análise.
+- O texto de um PDF escaneado só chega à saída se houver camada de texto visível; a camada de OCR invisível (modo de renderização 3) é tratada como texto invisível e descartada, e o documento vai para revisão sem texto.
+- A tinta é verificada por caractere na página renderizada; se outro texto visível ocupa exatamente o mesmo lugar, a tinta de um pode ser atribuída ao outro.
+- Caracteres invisíveis comuns em línguas e emoji (marcas de direção em hebraico e árabe, ZWNJ e ZWJ em persa, hindi e emoji, hífen suave) não geram alerta; os suspeitos (espaço de largura zero entre letras latinas, bidi override, tags Unicode, sequências) geram. Mensagens escritas com tags Unicode invisíveis são decodificadas antes da busca de frases.
+- Links simbólicos na pasta de entrada são ignorados, e arquivos que resolvem para fora dela também.
+- O processo de análise tem teto de 2 GB de memória virtual em Linux e macOS (um PDF de 14 KB pode inflar para gigabytes ao ser interpretado); no Windows não há esse teto e vale apenas o prazo.
+- Dois lotes ao mesmo tempo na mesma pasta de saída não se coordenam: ambos analisam tudo, sem corromper nada.
 - Camadas OCR invisíveis e recursos legítimos de acessibilidade podem gerar alertas.
 - Imagens, gradientes, recortes e efeitos de composição podem confundir a inspeção visual.
 - A inspeção de ações não substitui um antivírus; subprocessos não são uma sandbox do sistema operacional.
@@ -175,6 +181,6 @@ python -m evaluation.run_pdfs         # ataques escondidos, injeção visível e
 python -m evaluation.run_realistic    # PDFs de reportlab (e LibreOffice/wkhtmltopdf, se instalados)
 ```
 
-Resultado da versão 2.5: frases do conjunto inédito, **22 de 30** detectadas contra 4 de 30 da v2.0, com 0 falsos positivos em 40 linhas legítimas; 24 de 24 ataques escondidos, 11 de 11 sinalizações e 11 de 11 layouts legítimos nos PDFs sintéticos. O conjunto de desenvolvimento serve apenas como teste de regressão, porque os padrões foram ajustados olhando para ele; só o conjunto inédito mede generalização. Detalhes em `evaluation/README.md`. A integração contínua roda esses scripts com `--check` e falha se a qualidade piorar.
+Resultado da versão 2.6: frases do conjunto inédito, **22 de 30** detectadas contra 4 de 30 da v2.0, com 0 falsos positivos em 40 linhas legítimas; 27 de 27 ataques escondidos, 12 de 12 sinalizações e 13 de 13 layouts legítimos nos PDFs sintéticos. O conjunto de desenvolvimento serve apenas como teste de regressão, porque os padrões foram ajustados olhando para ele; só o conjunto inédito mede generalização. Detalhes em `evaluation/README.md`. A integração contínua roda esses scripts com `--check` e falha se a qualidade piorar.
 
 O código está comentado em português. Para contribuir, descreva o caso observado, use um PDF sintético sem dados pessoais e adicione um teste quando a mudança corrigir um comportamento relevante.
