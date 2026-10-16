@@ -57,7 +57,7 @@ jobs:
           sudo apt-get install -y xvfb
 
       - name: Análise estática (imports sem uso, nomes indefinidos)
-        run: python -m pyflakes app.py engine.py workflow.py review_ui.py test_app.py test_revision.py test_gui.py assets evaluation
+        run: python -m pyflakes app.py engine.py workflow.py review_ui.py test_app.py test_revision.py test_security.py test_gui.py assets evaluation
 
       # REQUIRE_GUI_TESTS=1 faz o teste da interface FALHAR (em vez de ser ignorado) se
       # não houver Tkinter ou tela: assim ele nunca "passa" sem ter realmente rodado.

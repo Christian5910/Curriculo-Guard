@@ -186,12 +186,16 @@ class ExtraRegressionTests(unittest.TestCase):
         self.assertEqual(json.loads(report.read_text())['app_version'],APP_VERSION)
     def test_manifest_ignores_environment_proxies(self):
         from engine import manifest_urls
+        import io
+        class Raw:
+            def __init__(self): self.buffer=io.BytesIO(b'["https://a.example/x.pdf"]')
+            def read1(self,size,decode_content=True): return self.buffer.read(size)
         class Response:
             status_code=200
+            def __init__(self): self.raw=Raw()
             def __enter__(self): return self
             def __exit__(self,*a): return False
             def raise_for_status(self): pass
-            def iter_content(self,size): yield b'["https://a.example/x.pdf"]'
         class Session:
             trust_env=True; last=None
             def __enter__(self): return self
@@ -290,7 +294,7 @@ class ExtraRegressionTests(unittest.TestCase):
         for index,name in enumerate(('\tTAB.pdf','\rCR.pdf','=1+1.pdf','  @x.pdf','normal.pdf')):
             (reports/f'r{index}.json').write_text(json.dumps({'status':'aprovados','original_name':name,'alerts':[],'history':[]}))
         target=self.root/'x.csv'; ReviewStore(self.root/'o').export_csv(target)
-        cells=[row[0] for row in csv.reader(open(target,encoding='utf-8',newline=''))][1:]
+        with open(target,encoding='utf-8',newline='') as stream: cells=[row[0] for row in csv.reader(stream)][1:]
         self.assertTrue(all(c.startswith("'") for c in cells if c!='normal.pdf'),cells); self.assertIn('normal.pdf',cells)
 
 if __name__=='__main__':unittest.main()

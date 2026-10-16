@@ -9,11 +9,15 @@ try:
 except ImportError:  # ambiente sem Tk: render_preview continua disponível
     tk = ttk = filedialog = messagebox = None
 import pymupdf
-from workflow import ReviewStore
+from workflow import ReviewStore, limit_memory, CHILD_MEMORY_MB
 
 
 def _render_child(sender, path, number, boxes):
-    """Renderiza uma página com teto de pixels e destaca retângulos de alertas."""
+    """Renderiza uma página com teto de pixels e destaca retângulos de alertas.
+
+    O PDF aberto aqui é, por definição, suspeito: o processo tem o mesmo teto de memória da análise.
+    """
+    limit_memory(CHILD_MEMORY_MB)
     try:
         with pymupdf.open(path) as doc:
             if doc.needs_pass: raise ValueError('PDF exige senha.')
@@ -27,7 +31,8 @@ def _render_child(sender, path, number, boxes):
             scale = min(600/width, 650/height, (2_000_000/(width*height))**.5)
             pix = page.get_pixmap(matrix=pymupdf.Matrix(scale,scale),alpha=False)
             sender.send(('ok',(pix.tobytes('png'),len(doc))))
-    except Exception as exc: sender.send(('error',str(exc)))
+    except MemoryError: sender.send(('error',f'Memória excedeu o limite da prévia ({CHILD_MEMORY_MB} MB).'))
+    except Exception as exc: sender.send(('error',str(exc) or type(exc).__name__))
     finally: sender.close()
 
 

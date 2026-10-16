@@ -1,3 +1,23 @@
+# Versão 2.7
+
+Nova bateria (rede, Unicode, revisão, fuzz). Cada defeito abaixo foi **reproduzido antes de corrigir** e tem teste de regressão em `test_security.py`, verificado por mutação (reintroduzir o defeito faz o teste falhar). A detecção não mudou: as três avaliações têm saída idêntica à da 2.6.
+
+Defeitos confirmados e corrigidos:
+
+- **DNS rebinding (segurança):** `is_public_https` validava o DNS e o `requests` resolvia o nome de novo ao conectar; um DNS que responde com IP público na validação e `127.0.0.1` na conexão fazia o app conectar à máquina local (comprovado com um servidor em `127.0.0.1:443`). Agora `strict_egress()` confere todos os IPs no momento da conexão e conecta direto ao IP validado, sem segunda resolução. Vale para PDFs e manifesto, por thread, e um teste sentinela falha se uma versão futura do urllib3 deixar de passar pelo ponto de conexão.
+- **Manifesto de URLs sem prazo:** a mesma falha do download corrigida na 2.6 ficou no manifesto (`iter_content` bloqueava com 1 byte por segundo; o Interromper não funcionava, 14 s depois do clique ainda travado). Agora usa `read1`, prazo de 30 s, cancelamento e a mesma rotina do download.
+- **Unicode hostil e nomes de arquivo:** um PDF cujo `ToUnicode` mapeia um glifo para meio par UTF-16, ou um currículo com nome em Latin-1 em Linux/macOS (`Currículo.pdf` gravado por um sistema antigo), gerava `UnicodeEncodeError` ao gravar o relatório: o arquivo **sumia do lote** (sem relatório, sem quarentena, só uma linha de log). Agora os textos são limpos na origem, o caso gera o alerta `unicode_indeterminado` (revisão humana), o nome é analisado por uma cópia segura e, como segunda camada, um resultado que não possa ser gravado vai para a quarentena.
+- **`decide()` apagava o TXT liberado antes de validar:** se a decisão falhasse (destino já existente, cópia ou gravação com erro), o relatório continuava "aprovados" sem o texto. Agora valida antes de revogar e restaura o TXT em qualquer falha. Também passou a conferir o SHA-256 da cópia (o README já prometia) e a não desfazer uma decisão concluída se a remoção do arquivo antigo falhar (Windows).
+- **NAT64:** `64:ff9b::/96` (que embute `127.0.0.1` ou o endereço de metadados de nuvem) passava no filtro de IP. Endereços IPv6 que embrulham um IPv4 (mapeado, NAT64, 6to4) são julgados pelo IPv4 embutido; Teredo é recusado.
+
+Endurecimento preventivo (sem defeito reproduzido):
+
+- A prévia da revisão humana, que abre o PDF suspeito, passou a ter o mesmo teto de memória da análise. Com as bombas de imagem e de glifos testadas, a prévia já usava pouca memória (64 e 190 MB); o teto vale para vetores ainda desconhecidos. O limitador foi movido para `workflow.py` para o processo da prévia não importar numpy.
+
+Verificado e **sem problema** (para não repetir a busca): coordenadas NaN/infinito em PDFs (o MuPDF as limita); a interface Tk aceita texto com meio par UTF-16 sem derrubar o laço de atualização; fuzz de 370 PDFs corrompidos (bytes trocados, truncados, duplicados) sem exceção, travamento ou arquivo perdido.
+
+Testes: 104 → 127. Também foi corrigido um `ResourceWarning` num teste de CSV.
+
 # Versão 2.6
 
 Resultado de uma bateria nova (segurança, robustez, alfabetos, escala, documentação executável, comparação com um segundo renderizador). Defeitos confirmados e corrigidos:

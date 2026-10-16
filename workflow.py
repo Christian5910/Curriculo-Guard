@@ -7,9 +7,24 @@ import csv
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+CHILD_MEMORY_MB = 2048   # teto de memória virtual dos processos filhos que leem PDFs não confiáveis (POSIX); PDFs normais usam < 450 MB
+
+
+def limit_memory(megabytes):
+    """Teto de memória virtual do processo atual (POSIX). No Windows não há equivalente simples; vale só o prazo.
+
+    Vive aqui, e não em engine.py, para a prévia da revisão aplicá-lo sem importar numpy no processo filho.
+    """
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (megabytes * 2**20, megabytes * 2**20))
+    except (ImportError, ValueError, OSError): pass
 
 
 def sha256_file(path):
@@ -94,12 +109,18 @@ class ReviewStore:
 
         Aprovação libera somente o texto filtrado já existente. Não restaura
         texto invisível nem transforma aprovação documental em contratação.
+
+        Todas as validações ocorrem ANTES de revogar o TXT liberado. A revogação vem primeiro para que o
+        texto nunca fique disponível enquanto o documento é bloqueado, mas, se a decisão falhar depois
+        (disco cheio, arquivo em uso, relatório não gravado), o TXT anterior é restaurado: um relatório
+        "aprovados" nunca fica sem o texto que o acompanha.
         """
         report_path = Path(report_path).resolve()
         if report_path.parent != self.reports.resolve(): raise ValueError('Relatório fora da saída.')
         if status not in ('aprovados','rejeitados','verificacao_humana'): raise ValueError('Destino inválido.')
         if not reviewer.strip() or not reason.strip(): raise ValueError('Informe revisor e justificativa.')
         data = self.load_report(report_path)
+        if not isinstance(data.get('file'), str) or not isinstance(data.get('status'), str): raise ValueError('Relatório sem arquivo ou destino válido.')
         source = self.checked_pdf(data)
         if data.get('status') in ('quarentena','duplicados'):
             raise ValueError('Reprocesse este arquivo antes de tomar uma decisão.')
@@ -108,23 +129,28 @@ class ReviewStore:
         old_status = data['status']
         target = self.root / status / source.name
         if not target.resolve().is_relative_to(self.root): raise ValueError('Destino aponta para fora da saída.')
+        if target != source and target.exists(): raise ValueError('Já existe documento com esse nome no destino.')
         target.parent.mkdir(parents=True, exist_ok=True)
-        # Revogar primeiro evita TXT disponível enquanto o documento é bloqueado.
         text_path = report_path.with_suffix('.txt')
-        text_path.unlink(missing_ok=True)
-        if target != source:
-            import shutil
-            if target.exists(): raise ValueError('Já existe documento com esse nome no destino.')
-            shutil.copy2(source, target)
-        data.update(file=str(target), status=status)
-        data.setdefault('history', []).append({'time':datetime.now(timezone.utc).isoformat(),
-            'from':old_status,'to':status,'reviewer':reviewer.strip(),'reason':reason.strip()})
-        try: write_report(report_path, data)
+        previous_text = text_path.read_bytes() if text_path.is_file() else None
+        text_path.unlink(missing_ok=True)   # revogar primeiro: sem TXT disponível enquanto o documento é bloqueado
+        try:
+            if target != source:
+                shutil.copy2(source, target)
+                if sha256_file(target) != data['sha256']: raise ValueError('Integridade falhou: PDF mudou durante a cópia.')
+            data.update(file=str(target), status=status)
+            data.setdefault('history', []).append({'time':datetime.now(timezone.utc).isoformat(),
+                'from':old_status,'to':status,'reviewer':reviewer.strip(),'reason':reason.strip()})
+            write_report(report_path, data)
         except Exception:
             if target != source: target.unlink(missing_ok=True)
+            if previous_text is not None: atomic_write(text_path, previous_text.decode('utf-8'))   # decisão não aplicada: o TXT volta
             raise
-        if target != source: source.unlink()
+        # O relatório já aponta para o destino: daqui em diante nada mais pode desfazer a decisão.
         if status == 'aprovados': atomic_write(text_path, data['text'])
+        if target != source:
+            try: source.unlink()
+            except OSError: pass   # cópia antiga em uso (ex.: Windows); o relatório já aponta para o novo arquivo
         return data
 
     def export_csv(self, path):

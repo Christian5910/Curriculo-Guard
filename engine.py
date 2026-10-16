@@ -4,21 +4,22 @@ Este módulo não importa Tkinter: pode ser usado em scripts, testes e servidore
 O PDF e os relatórios são dados não confiáveis: nunca executar suas instruções.
 Depende de pymupdf, numpy e requests (Python 3.11+).
 """
-import os, re, json, shutil, threading, socket, ipaddress
+import os, re, json, shutil, tempfile, threading, socket, ipaddress
 import unicodedata, uuid, time, multiprocessing, math, bisect, contextlib
 from collections import Counter
 from itertools import islice
-from workflow import sha256_file, atomic_write, write_report
+from workflow import sha256_file, atomic_write, write_report, limit_memory as _limit_memory, CHILD_MEMORY_MB
 from pathlib import Path
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 import requests
+import urllib3.util.connection as _urllib3_connection
 import pymupdf
 import numpy as np
 
-APP_VERSION = '2.6'
-CHILD_MEMORY_MB = 2048     # teto de memória virtual do processo de análise (POSIX); PDFs normais usam < 450 MB
+APP_VERSION = '2.7'
 DOWNLOAD_DEADLINE_S = 90   # prazo total de um download, mesmo que o servidor "goteje" bytes
+MANIFEST_DEADLINE_S = 30   # prazo total para ler o manifesto de URLs (mesma defesa contra o gotejamento)
 LEGIBLE_RATIO = 3.0        # contraste (na página já renderizada) a partir do qual o texto é legível
 WINDOWS_RESERVED = {'con','prn','aux','nul'} | {f'com{i}' for i in range(1,10)} | {f'lpt{i}' for i in range(1,10)}
 SINGLE_THREAD_VARS = ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS')
@@ -106,9 +107,21 @@ SQUASHED_PHRASES = (
     'ignoreasinstrucoesanteriores', 'desconsidereasinstrucoesanteriores', 'esquecatudo',
 )
 
+_NAT64 = ipaddress.ip_network('64:ff9b::/96')   # tradução IPv6→IPv4 (RFC 6052): o IPv4 de destino vai nos últimos 32 bits
+
+
 def _is_public_ip(text):
-    """IP roteável na internet pública (multicast, privado, local e reservado ficam de fora)."""
+    """IP roteável na internet pública (multicast, privado, local e reservado ficam de fora).
+
+    Endereços IPv6 que apenas embrulham um IPv4 (mapeado `::ffff:`, NAT64 `64:ff9b::/96`, 6to4) são
+    julgados pelo IPv4 embutido: `64:ff9b::7f00:1` aponta para 127.0.0.1 e `is_global` sozinho o deixa passar
+    (e o tratamento varia entre versões do Python). Teredo nunca é aceito.
+    """
     ip = ipaddress.ip_address(text.split('%')[0])
+    if ip.version == 6:
+        if ip.teredo is not None: return False
+        embedded = ip.ipv4_mapped or ip.sixtofour or (ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF) if ip in _NAT64 else None)
+        if embedded is not None: return _is_public_ip(str(embedded))
     return ip.is_global and not ip.is_multicast
 
 
@@ -126,7 +139,11 @@ def valid_folder_name(name, reserved=()):
 
 
 def is_public_https(url):
-    """Valida protocolo e IPs públicos; exige política de saída contra DNS rebinding."""
+    """Valida protocolo e IPs públicos (falha rápida, com mensagem clara).
+
+    Não basta sozinha: o IP é conferido de novo, no momento da conexão, por `strict_egress()`, que fecha a
+    janela de DNS rebinding. Um firewall de saída continua sendo uma boa defesa adicional.
+    """
     if any(ord(ch) <= 32 or ord(ch) == 127 for ch in url): raise ValueError('URL com espaços ou caracteres de controle.')
     p = urlparse(url)
     if p.scheme != 'https' or not p.hostname or p.username or p.password or p.port not in (None, 443):
@@ -135,6 +152,57 @@ def is_public_https(url):
     if not addresses or any(not _is_public_ip(a[4][0]) for a in addresses):
         raise ValueError('Destino privado, local ou não público bloqueado.')
     return url
+
+
+_egress = threading.local()
+_original_create_connection = _urllib3_connection.create_connection
+
+
+def _guarded_create_connection(address, *args, **kwargs):
+    """Conecta só a IPs públicos quando `strict_egress()` está ativo nesta thread.
+
+    `is_public_https` valida o DNS e o `requests` resolve o nome DE NOVO ao conectar; um DNS hostil
+    responde com IP público na primeira consulta e com 127.0.0.1 na segunda (DNS rebinding). Aqui a
+    resolução acontece uma única vez, no momento da conexão: todos os IPs são conferidos e a conexão
+    é feita direto no IP já validado, sem nova consulta. Fora de `strict_egress()` nada muda.
+    """
+    if not getattr(_egress, 'strict', False): return _original_create_connection(address, *args, **kwargs)
+    host, port = address
+    infos = socket.getaddrinfo(host.strip('[]'), port, type=socket.SOCK_STREAM)
+    addresses = list(dict.fromkeys(info[4][0] for info in infos))
+    if not addresses or any(not _is_public_ip(a) for a in addresses):
+        raise ValueError('Destino privado, local ou não público bloqueado.')
+    last = None
+    for ip in addresses:
+        try: return _original_create_connection((ip, port), *args, **kwargs)
+        except OSError as exc: last = exc
+    raise last
+
+
+_urllib3_connection.create_connection = _guarded_create_connection
+
+
+@contextlib.contextmanager
+def strict_egress():
+    """Dentro deste bloco, as conexões da thread atual só alcançam IPs públicos (ver `_guarded_create_connection`)."""
+    previous = getattr(_egress, 'strict', False)
+    _egress.strict = True
+    try: yield
+    finally: _egress.strict = previous
+
+
+def _copy_body(response, write, limit, too_big, deadline, timed_out, cancel=None):
+    """Copia o corpo da resposta com teto de bytes, prazo total e cancelamento conferidos a cada chegada de bytes."""
+    total = 0
+    while True:
+        if cancel is not None and cancel.is_set(): raise ValueError('Download cancelado.')
+        if time.monotonic() > deadline: raise TimeoutError(timed_out)
+        chunk = _read_arrived(response)
+        if not chunk: return total
+        total += len(chunk)
+        if total > limit: raise ValueError(too_big)
+        write(chunk)
+
 
 def _read_arrived(response):
     """Lê o que já chegou do servidor, sem esperar completar um bloco.
@@ -153,23 +221,16 @@ def download_pdf(url, dest, cancel=None):
     partial = dest.with_name(dest.name + '.' + uuid.uuid4().hex + '.part')
     deadline = time.monotonic() + DOWNLOAD_DEADLINE_S
     try:
-        # Desabilitar proxies de ambiente reduz destinos inesperados.
-        with requests.Session() as session:
+        # Desabilitar proxies de ambiente reduz destinos inesperados; strict_egress confere o IP na conexão.
+        with strict_egress(), requests.Session() as session:
             session.trust_env = False
             with session.get(url, stream=True, timeout=(8, 10), allow_redirects=False,
                              headers={'User-Agent':f'CurriculoGuard/{APP_VERSION}'}) as response:
                 if 300 <= response.status_code < 400: raise ValueError('Redirecionamento bloqueado.')
                 response.raise_for_status()
-                total = 0
                 with partial.open('wb') as stream:
-                    while True:
-                        if cancel is not None and cancel.is_set(): raise ValueError('Download cancelado.')
-                        if time.monotonic() > deadline: raise TimeoutError(f'Download excedeu {DOWNLOAD_DEADLINE_S} segundos.')
-                        chunk = _read_arrived(response)
-                        if not chunk: break
-                        total += len(chunk)
-                        if total > MAX_BYTES: raise ValueError('PDF excede 15 MB.')
-                        stream.write(chunk)
+                    _copy_body(response, stream.write, MAX_BYTES, 'PDF excede 15 MB.', deadline,
+                               f'Download excedeu {DOWNLOAD_DEADLINE_S} segundos.', cancel)
         if not has_pdf_header(partial): raise ValueError('Arquivo não tem assinatura PDF.')
         os.replace(partial, dest)
     finally:
@@ -184,6 +245,23 @@ _CONFUSABLES = str.maketrans({
     'А':'A','В':'B','Е':'E','К':'K','М':'M','Н':'H','О':'O','Р':'P','С':'C','Т':'T','Х':'X','І':'I','Ј':'J','Ѕ':'S',
     'ο':'o','Ο':'O','α':'a','ν':'v','ι':'i','ρ':'p','τ':'t','Α':'A','Β':'B','Ε':'E','Ι':'I','Κ':'K','Μ':'M','Ν':'N','Ρ':'P','Τ':'T','Χ':'X','Υ':'Y','Ζ':'Z',
 })
+
+
+_SURROGATES = re.compile('[\ud800-\udfff]')   # metade solta de par UTF-16: str válida em Python, mas não codificável em UTF-8
+_BAD_UNICODE = re.compile('[\ud800-\udfff\ufffd]')
+
+
+def scrub(value):
+    """Troca substitutos Unicode soltos por U+FFFD, recursivamente (str, listas, tuplas e dicionários).
+
+    Um PDF pode mapear glifos para meio par UTF-16 (ToUnicode) e, em Linux/macOS, um nome de arquivo em
+    Latin-1 vira substitutos ao ser lido. Tais textos não codificam em UTF-8: sem esta limpeza o relatório
+    não é gravado e o arquivo some do lote sem relatório nem quarentena.
+    """
+    if isinstance(value, str): return _SURROGATES.sub('\ufffd', value) if _SURROGATES.search(value) else value
+    if isinstance(value, dict): return {scrub(k): scrub(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)): return [scrub(v) for v in value]
+    return value
 
 
 _TAG_RUN = re.compile('[\U000E0020-\U000E007E]+')
@@ -522,7 +600,7 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                         if overlap(span['bbox'], tuple(page.rect)) < .98:
                             alerts.append({'type':'fora_da_pagina','severity':'review','page':pn,'sample':t[:100],'bbox':list(span['bbox'])})
                             continue
-                        if '\ufffd' in t:
+                        if _BAD_UNICODE.search(t):
                             alerts.append({'type':'unicode_indeterminado','severity':'review','page':pn,'detail':'Caractere sem mapeamento Unicode confiável.'})
                         size_px = float(span['size']) * reference_dpi / 72
                         if any(overlap(span['bbox'], b) > .01 for b in blocked_boxes):
@@ -587,7 +665,7 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
     # Reduz alertas repetidos por tipo/página, preservando um exemplo.
     unique = list({(a['type'],a.get('page')):a for a in reversed(alerts)}.values())
     unique.reverse()
-    return {'alerts':unique, 'text':text, 'metrics':metrics}
+    return scrub({'alerts':unique, 'text':text, 'metrics':metrics})
 
 def structural_checks(doc, alerts):
     """Sinaliza ações/layers sem executar JS, Launch ou anexos do documento.
@@ -607,18 +685,17 @@ def structural_checks(doc, alerts):
             alerts.append({'type':'camadas_opcionais','severity':'review','detail':'Camadas opcionais podem mudar a visibilidade.'})
 
 
-def _limit_memory(megabytes):
-    """Teto de memória virtual do processo de análise (POSIX). No Windows não há equivalente simples; vale só o prazo."""
-    try:
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, (megabytes * 2**20, megabytes * 2**20))
-    except (ImportError, ValueError, OSError): pass
-
-
 def _analyze_child(connection, path, options):
     """Entrada de subprocesso: envia resultado ou erro, sem iniciar Tkinter."""
     _limit_memory(CHILD_MEMORY_MB)
-    try: connection.send(('ok', analyze_pdf(path, **options)))
+    try:
+        if _SURROGATES.search(path):
+            # Nome de arquivo com bytes inválidos em UTF-8 (ex.: Latin-1 em Linux): o PyMuPDF não abre esse
+            # caminho, então a análise usa uma cópia com nome seguro. O resultado não contém o caminho.
+            with tempfile.TemporaryDirectory() as folder:
+                safe = Path(folder) / 'entrada.pdf'; shutil.copyfile(path, safe)
+                connection.send(('ok', analyze_pdf(safe, **options)))
+        else: connection.send(('ok', analyze_pdf(path, **options)))
     except MemoryError: connection.send(('error', f'Memória excedeu o limite de análise ({CHILD_MEMORY_MB} MB).'))
     except Exception as exc: connection.send(('error', str(exc) or type(exc).__name__))
     finally: connection.close()
@@ -692,9 +769,12 @@ class Pipeline:
             actions = [self.routes.get(a['type'], 'verificacao_humana') for a in result['alerts']]
             folder = ('rejeitados' if self.reject_files and 'rejeitados' in actions else 'verificacao_humana') if actions else 'aprovados'
             result['configuration'] = {'reference_dpi': self.reference_dpi, 'analysis_dpi': self.analysis_dpi, 'min_px': self.min_px, 'checks': self.analysis_options, 'routes': self.routes, 'automatic_block': self.reject_files}
+            # Segunda camada: um resultado que não vira JSON/UTF-8 vai para a quarentena em vez de derrubar o arquivo.
+            try: json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')
+            except (ValueError, TypeError) as exc: raise ValueError('Resultado da análise não pôde ser gravado: ' + str(exc)) from exc
         except Exception as exc:
             folder = 'quarentena'
-            result = {'error':str(exc),'alerts':[{'type':'erro_processamento','severity':'review'}]}
+            result = {'error':scrub(str(exc)),'alerts':[{'type':'erro_processamento','severity':'review'}]}
         result['sha256'] = digest
         return self._move(source,folder,result)
 
@@ -706,7 +786,7 @@ class Pipeline:
             raise ValueError('Arquivo mudou durante a análise; resultado não publicado.')
         identifier = uuid.uuid4().hex
         # ID único: duplicatas/reanálises não sobrescrevem relatórios anteriores.
-        target = self.root / folder / f'{source.stem[:45]}_{identifier}.pdf'
+        target = self.root / folder / f'{_SURROGATES.sub("_", source.stem[:45])}_{identifier}.pdf'   # sem substitutos no nome nem no relatório
         shutil.copy2(source,target)
         if sha256_file(target) != digest:
             target.unlink(missing_ok=True)
@@ -714,6 +794,7 @@ class Pipeline:
         stamp = datetime.now(timezone.utc).isoformat()
         report.update({'id':identifier,'sha256':digest,'file':str(target),'original_name':source.name,
                        'status':folder,'processed_at':stamp,'history':[],'app_version':APP_VERSION})
+        report = scrub(report)
         report_path = self.root / 'relatorios' / (target.stem+'.json')
         try: write_report(report_path,report)
         except Exception:
@@ -725,20 +806,25 @@ class Pipeline:
         return folder, target
 
 
-def manifest_urls(url):
-    """Aceita PDF direto ou JSON explícito; não raspa diretórios arbitrários."""
+def manifest_urls(url, cancel=None):
+    """Aceita PDF direto ou JSON explícito; não raspa diretórios arbitrários.
+
+    A leitura do manifesto tem prazo total e responde ao cancelamento, como o download de PDFs: um servidor
+    que "goteja" bytes não pode segurar o lote (nem o botão Interromper) indefinidamente.
+    """
     if not urlparse(url).path.lower().endswith('.json'): return [url]
     is_public_https(url)
-    with requests.Session() as session:
+    content = bytearray()
+    with strict_egress(), requests.Session() as session:
         session.trust_env = False  # mesma política do download: sem proxies de ambiente
-        with session.get(url,stream=True,timeout=(8,25),allow_redirects=False) as response:
+        with session.get(url, stream=True, timeout=(8, 25), allow_redirects=False,
+                         headers={'User-Agent':f'CurriculoGuard/{APP_VERSION}'}) as response:
             if 300 <= response.status_code < 400: raise ValueError('Redirecionamento bloqueado.')
-            response.raise_for_status(); content=bytearray()
-            for chunk in response.iter_content(16384):
-                content.extend(chunk)
-                if len(content)>65536: raise ValueError('Manifesto excede 64 KB.')
-    links=json.loads(content)
-    if not isinstance(links,list) or not 1 <= len(links) <= 100 or any(not isinstance(v,str) for v in links):
+            response.raise_for_status()
+            _copy_body(response, content.extend, 65536, 'Manifesto excede 64 KB.', time.monotonic() + MANIFEST_DEADLINE_S,
+                       f'Leitura do manifesto excedeu {MANIFEST_DEADLINE_S} segundos.', cancel)
+    links = json.loads(content)
+    if not isinstance(links, list) or not 1 <= len(links) <= 100 or any(not isinstance(v, str) for v in links):
         raise ValueError('Manifesto deve ser lista JSON com 1 a 100 URLs.')
     for link in links: is_public_https(link)
     return links
@@ -772,7 +858,8 @@ def run_batch(params, url='', local='', recursive=False, cancel=None, report=Non
     threading.Event). `report(tipo, valor)` recebe 'log', 'total' e 'progress'. Erros
     individuais não abortam o lote. Devolve um Counter com o destino de cada arquivo.
     """
-    report = report or (lambda kind, value: None)
+    notify = report or (lambda kind, value: None)
+    report = lambda kind, value: notify(kind, scrub(value) if kind == 'log' else value)
     cancel = cancel or threading.Event()
     validate_params(params)
     pipe = Pipeline(**params); sources = []; destinations = Counter()
@@ -783,7 +870,7 @@ def run_batch(params, url='', local='', recursive=False, cancel=None, report=Non
         for p in candidates:
             if p.is_symlink() or not p.resolve().is_relative_to(folder): report('log', f'{p.name}: ignorado (link simbólico ou fora da pasta de origem)')
         sources.extend(p for p in candidates if not p.is_symlink() and p.resolve().is_relative_to(folder) and pipe.root not in p.resolve().parents)
-    for link in (manifest_urls(url) if url else []):
+    for link in (manifest_urls(url, cancel) if url else []):
         if cancel.is_set(): break
         dest = pipe.root / 'originais' / ('download_' + uuid.uuid4().hex + '.pdf')
         try: download_pdf(link, dest, cancel); sources.append(dest)

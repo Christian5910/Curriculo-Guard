@@ -1,4 +1,4 @@
-# Currículo Guard — versão 2.6
+# Currículo Guard — versão 2.7
 
 Aplicativo desktop Python 3.11+ com Tkinter. Código comentado em português. Extraia todos os arquivos do ZIP juntos: app.py depende de engine.py, workflow.py e review_ui.py.
 
@@ -57,7 +57,7 @@ O contraste mínimo padrão é 2,0:1; configurações salvas na versão 2.0 mant
 
 O app não usa IA, não analisa mérito profissional e não executa comandos do PDF. Integrações futuras devem isolar conteúdo não confiável, sem acesso a ferramentas, segredos ou critérios mutáveis. A análise roda em subprocesso com tempo máximo configurável (5–180 segundos, padrão 45); a prévia tem limite de 15 segundos. Subprocesso não é sandbox de segurança e não estabelece limite rígido de memória para todas as etapas do parser. Teto de renderização: 20 milhões de pixels por página na análise e 2 milhões na prévia; 30 mil objetos e 1 milhão de caracteres. Máximo de páginas configurável (1–100, padrão 35).
 
-Execute PDFs externos em ambiente isolado, com dependências atualizadas. Validação de IP não substitui firewall de saída: há janela de DNS rebinding.
+Execute PDFs externos em ambiente isolado, com dependências atualizadas. O IP é conferido no momento da conexão (sem janela de DNS rebinding), mas um firewall de saída continua sendo uma boa defesa adicional.
 
 ## Validação
 
@@ -65,9 +65,9 @@ Execute PDFs externos em ambiente isolado, com dependências atualizadas. Valida
 python -m unittest -v
 ```
 
-104 testes automatizados: casos originais de filtragem; preservação de relatórios em duplicatas e reanálises; decisões com histórico; revogação do TXT; alteração/caminho do PDF; campos auxiliares; normalização Unicode; ações ativas; limites de páginas e tempo; geração real de PNG de prévia; CSV; arquivos corrompidos; downloads simulados e limpeza de temporários; texto fora da área visível; fundo heterogêneo; alteração entre análise/cópia e symlinks de fuga; contraste contra o fundo real (texto sobre caixa do mesmo tom, réguas, selos, páginas rotacionadas), cobertura fragmentada, gradientes, frases de injeção e legítimas, letras separadas e homóglifos; reanálise de quarentena; importação sem Tkinter; download com gotejamento (prazo e cancelamento); bombas de memória; links simbólicos; PDF sem relatório; cabeçalho com BOM; destaque translúcido e cobertura parcial; caracteres invisíveis; tags Unicode; manifesto sem proxy de ambiente; relatórios malformados; motor sem Tkinter, `run_batch` e `validate_params`; ícone e cabeçalho; rótulos sem corte e alinhados; fluxo completo pela interface real (lote, revisão, CSV, configuração).
+127 testes automatizados: casos originais de filtragem; preservação de relatórios em duplicatas e reanálises; decisões com histórico; revogação do TXT; alteração/caminho do PDF; campos auxiliares; normalização Unicode; ações ativas; limites de páginas e tempo; geração real de PNG de prévia; CSV; arquivos corrompidos; downloads simulados e limpeza de temporários; texto fora da área visível; fundo heterogêneo; alteração entre análise/cópia e symlinks de fuga; contraste contra o fundo real (texto sobre caixa do mesmo tom, réguas, selos, páginas rotacionadas), cobertura fragmentada, gradientes, frases de injeção e legítimas, letras separadas e homóglifos; reanálise de quarentena; importação sem Tkinter; download com gotejamento (prazo e cancelamento); bombas de memória; links simbólicos; PDF sem relatório; cabeçalho com BOM; destaque translúcido e cobertura parcial; caracteres invisíveis; tags Unicode; manifesto sem proxy de ambiente; relatórios malformados; motor sem Tkinter, `run_batch` e `validate_params`; ícone e cabeçalho; rótulos sem corte e alinhados; fluxo completo pela interface real (lote, revisão, CSV, configuração); DNS rebinding contra servidor local real, NAT64 e IPv4 embutido, manifesto com prazo e cancelamento, Unicode hostil (ToUnicode com meio par UTF-16), nome de arquivo em Latin-1, falhas de cópia e gravação em `decide()` e teto de memória da prévia.
 
-Interface Tkinter ainda sem validação visual neste ambiente. Downloads foram testados com respostas simuladas, não com servidor externo real. Os testes não comprovam detecção de todos os ataques.
+Interface Tkinter ainda sem validação visual neste ambiente. Downloads foram testados com respostas simuladas e com servidores locais, não com servidor externo real: TLS e validação de certificado não têm cobertura automatizada. Os testes não comprovam detecção de todos os ataques.
 
 ## Arquivos
 
@@ -77,7 +77,7 @@ Interface Tkinter ainda sem validação visual neste ambiente. Downloads foram t
 - review_ui.py: fila de revisão e prévia.
 - assets/: ícone do aplicativo (icon.svg é a fonte; make_icons.py gera os PNGs e o .ico).
 - evaluation/: corpus de frases e scripts que reproduzem as medições (`python -m evaluation.run_phrases`, `run_pdfs`, `run_realistic`).
-- test_app.py, test_revision.py e test_gui.py: testes (test_gui.py usa a interface real e é ignorado sem tela).
+- test_app.py, test_revision.py, test_security.py e test_gui.py: testes (test_gui.py usa a interface real e é ignorado sem tela).
 - .github/workflows/tests.yml e requirements-dev.txt: integração contínua e dependências de desenvolvimento.
 - requirements.txt: dependências.
 
