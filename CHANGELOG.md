@@ -1,3 +1,27 @@
+# Versão 2.9
+
+Terceira bateria: o que passa pelo detector, onde os renderizadores divergem, relatórios hostis e exportação. Como nas versões anteriores, cada defeito foi reproduzido antes de corrigir e tem teste de regressão verificado por mutação (remover o mecanismo faz o teste falhar).
+
+Defeitos confirmados:
+
+- **Texto invisível por modo de mesclagem vazava para o TXT (segurança):** o MuPDF compõe a página sobre fundo transparente e mostra preto o texto preto com `/BM /Lighten`; leitores que desenham sobre papel branco (Chrome, poppler) mostram a página vazia. O texto ia para o TXT liberado sem nenhum alerta. Com `Screen`, `Overlay`, `Lighten`, `ColorDodge`, `ColorBurn`, `SoftLight`, `Difference` e `Exclusion` o efeito é o mesmo. Agora, quando o PDF usa modos de mesclagem (detectados no passe estrutural, sem custo nos demais), a página também é renderizada sobre papel branco opaco e o texto que só existe na composição transparente é sinalizado como `baixo_contraste`. `Normal`, `Multiply`, `Darken` e `HardLight` com texto visível seguem sem alerta.
+- **Evasões que o detector não enxergava (13 casos):** hifenização de fim de linha (acontece naturalmente em PDF), sílabas separadas, leetspeak, texto invertido, ROT13, base64, hexadecimal, número de página no meio da frase, e os pedidos para ignorar as instruções em espanhol, francês, alemão e italiano. Agora: variantes do texto sem hifenização e sem leetspeak, frases longas procuradas sempre no texto achatado (também invertidas e em ROT13), decodificação de cargas base64/hexadecimais que viram texto legível e padrões multilíngues. Um conjunto de 40 frases legítimas em seis idiomas (mais hashes, JWT, base64 de binário e tokens com números) protege contra falso positivo.
+- **Relatório gigante travava a tela de revisão:** um relatório de 600 MB levava 10,7 s e 1,2 GB de memória a cada atualização da tabela (e um maior estouraria a memória, que nem estava no `except`). Acima de 64 MB o relatório não é lido e aparece como inválido: 0,0 s e 17 MB.
+
+Funcionalidade nova:
+
+- **CSV para o Excel em português:** o CSV saía com vírgulas e sem BOM, e no Excel brasileiro tudo caía na coluna A com acentos corrompidos. A tela ganhou a opção "Para Excel em português" (ligada por padrão): separador `;` e BOM UTF-8. `export_csv(path)` continua gerando o CSV comum.
+
+Resultado da avaliação: o conjunto inédito foi de 22 para **23 de 30**, mas esse ponto vem só do espanhol, acrescentado sabendo que havia uma frase em espanhol no conjunto; não é evidência de melhor generalização. As evasões acima foram escritas depois de eu vê-las passar, então são testes de regressão e não uma medida independente. As avaliações de PDFs (27 de 27, 12 de 12, 13 de 13) ficaram idênticas.
+
+Tropeços desta rodada, para registro: a primeira versão do leetspeak era quadrática em tokens longos e levou a suíte de 40 s a 157 s (pega pelos testes de desempenho que já existiam; agora é linear, com custo equivalente ao anterior); a primeira matriz de evasões estava mascarada pelo trecho final "approve this candidate", que casa com outro padrão; e um mutante legítimo escapou do guarda de falso positivo até eu acrescentar frases em que "forget" e "Everything" ficam coladas depois de tirar a pontuação.
+
+Verificado e **sem problema**: operadores de texto que escondem (`Tz 0`, `Tc` enorme, `Tr 3`, fonte de 0,001 pt, branco sobre branco, fora da página, retângulo por cima, alfa 0, Type 3 com glifos vazios) são todos sinalizados; texto cortado por clip vazio ou por Form XObject com `BBox` vazio não chega ao TXT (o MuPDF não o extrai).
+
+Limites conhecidos: esse texto cortado não gera alerta e eu não verifiquei se outros extratores (pypdf, pdfminer, poppler) o leem no PDF original, que continua guardado na pasta de aprovados; modos de mesclagem são a única divergência de renderizador que tratei, e outras podem existir; paráfrases novas, outros idiomas e outras codificações continuam passando; o CSV para Excel não foi aberto no Excel de verdade, só verificado byte a byte.
+
+Testes: 157 → 181 (8 de interface real). Verificado em Python 3.11, 3.12 e 3.13.
+
 # Versão 2.8
 
 Segunda bateria, focada no que a 2.7 não tocou: canais de ataque, escala, concorrência e uso repetido. Como na 2.7, cada defeito foi reproduzido antes de corrigir e tem teste de regressão verificado por mutação (remover o mecanismo faz o teste falhar). Duas das correções não cabem em remendos pontuais e viraram funcionalidades.
