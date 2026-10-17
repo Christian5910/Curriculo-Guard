@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+MAX_REPORT_BYTES = 64 * 2**20   # um relatório real tem poucos MB (texto até 1 milhão de caracteres); acima disso não é lido
 CHILD_MEMORY_MB = 2048   # teto de memória virtual dos processos filhos que leem PDFs não confiáveis (POSIX); PDFs normais usam < 450 MB
 
 
@@ -160,6 +161,8 @@ class ReviewStore:
         Relatórios são dados não confiáveis: JSON profundamente aninhado ou com
         campos de tipo errado viram erro contabilizado, nunca exceção na tela.
         """
+        size = Path(path).stat().st_size
+        if size > MAX_REPORT_BYTES: raise ValueError(f'Relatório grande demais ({size // 2**20} MB); não foi lido')
         try: data = json.loads(Path(path).read_text(encoding='utf-8'))
         except RecursionError as exc: raise ValueError('JSON aninhado em excesso') from exc
         if not isinstance(data, dict): raise ValueError('Relatório não é objeto JSON')
@@ -252,20 +255,24 @@ class ReviewStore:
             except OSError: pass   # cópia antiga em uso (ex.: Windows); o relatório já aponta para o novo arquivo
         return data
 
-    def export_csv(self, path):
-        """Exporta inventário sem texto do currículo e neutraliza fórmulas CSV."""
+    def export_csv(self, path, excel_br=False):
+        """Exporta inventário sem texto do currículo e neutraliza fórmulas CSV.
+
+        `excel_br` prepara o arquivo para o Excel em português: separador `;` (o separador de lista do Brasil) e
+        BOM UTF-8, sem o qual os acentos aparecem corrompidos. O padrão continua sendo vírgula, sem BOM.
+        """
         def cell(value):
             value = str(value)
             if value.lstrip().startswith(('=', '+', '-', '@')) or value[:1] in ('\t', '\r'): return "'" + value
             return value
         import io
         stream = io.StringIO(newline='')
-        writer = csv.writer(stream)
+        writer = csv.writer(stream, delimiter=';' if excel_br else ',')
         writer.writerow(['arquivo','status','alertas','sha256','processado_em','revisoes'])
         rows, errors = self.list_reports()
         for _, data in rows:
             writer.writerow([cell(data.get('original_name','')), cell(data.get('status','')),
                 cell('; '.join(a.get('type','') for a in data.get('alerts',[]))),
                 cell(data.get('sha256','')), cell(data.get('processed_at','')),len(data.get('history',[]))])
-        atomic_write(path, stream.getvalue())
+        atomic_write(path, ('\ufeff' if excel_br else '') + stream.getvalue())
         return len(rows), len(errors)

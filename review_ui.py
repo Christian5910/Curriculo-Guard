@@ -67,6 +67,8 @@ class ReviewPanel(ttk.Frame if ttk else object):
         ttk.Entry(row,textvariable=self.search,width=23).pack(side='left',padx=5)
         ttk.Button(row,text='Atualizar / buscar',command=self.refresh).pack(side='left')
         ttk.Button(row,text='Exportar CSV',command=self.export).pack(side='right')
+        self.excel_br=tk.BooleanVar(value=True)
+        ttk.Checkbutton(row,text='Para Excel em português (separador ;)',variable=self.excel_br).pack(side='right',padx=(0,8))
         table_box=ttk.Frame(self);table_box.pack(fill='both',expand=True,pady=5)
         self.table=ttk.Treeview(table_box,columns=('name','status','alerts'),show='headings',height=6,selectmode='browse')
         for key,title,width in [('name','Arquivo',310),('status','Destino',170),('alerts','Alertas',270)]:
@@ -144,7 +146,7 @@ class ReviewPanel(ttk.Frame if ttk else object):
         path=filedialog.asksaveasfilename(defaultextension='.csv',filetypes=[('CSV','*.csv')])
         if path:
             try:
-                count,errors=self.store().export_csv(path)
+                count,errors=self.store().export_csv(path,excel_br=self.excel_br.get())
                 self.summary.configure(text=f'Exportados {count} registros; {errors} relatórios inválidos ignorados.')
             except Exception as exc: messagebox.showerror('Exportação',str(exc))
 

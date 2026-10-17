@@ -187,6 +187,24 @@ class InterfaceTests(unittest.TestCase):
             self.assertIn('ERRO: Já existe um lote em andamento', log)
         self.assertEqual(self.callback_errors, [])
 
+    def test_csv_export_for_excel_checkbox_through_the_real_interface(self):
+        """O checkbox (ligado por padrão) liga o separador ';' e o BOM; desligado, volta ao CSV de vírgulas."""
+        import json
+        ui, review = self.ui, self.ui.review
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp); (tmp / 'saida' / 'relatorios').mkdir(parents=True)
+            (tmp / 'saida' / 'relatorios' / 'r.json').write_text(json.dumps({'status': 'aprovados', 'original_name': 'Currículo.pdf', 'file': 'x.pdf', 'alerts': [], 'history': []}, ensure_ascii=False), encoding='utf-8')
+            ui.out.set(str(tmp / 'saida')); results = {}
+            self.assertTrue(review.excel_br.get(), 'ligado por padrão: o público do aplicativo usa Excel em português')
+            for label, value in (('excel', True), ('comum', False)):
+                review.excel_br.set(value); target = tmp / f'{label}.csv'
+                with patch.object(filedialog, 'asksaveasfilename', lambda **kw: str(target)): review.export()
+                results[label] = target.read_bytes()
+            review.excel_br.set(True)
+        self.assertTrue(results['excel'].startswith(b'\xef\xbb\xbfarquivo;status;'))
+        self.assertTrue(results['comum'].startswith(b'arquivo,status,'))
+        self.assertEqual(self.callback_errors, [])
+
     def test_form_validation_shows_dialogs(self):
         ui = self.ui; ui.local.set(''); ui.url.set('')
         ui.start(); self.assertEqual(self.dialogs[-1], ('Entrada inválida', 'Informe URL ou pasta local.'))
