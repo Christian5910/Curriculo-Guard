@@ -1,7 +1,8 @@
 """Persistência, revisão humana e exportação: nenhuma decisão de contratação.
 
-Todas as gravações de JSON são atômicas. O histórico pertence ao documento;
-conteúdo extraído e comentários do revisor continuam sendo dados não confiáveis.
+Todas as gravações de JSON são atômicas e as alterações concorrentes são serializadas por travas de arquivo
+(`FileLock`). O histórico pertence ao documento; conteúdo extraído e comentários do revisor continuam sendo
+dados não confiáveis.
 """
 import csv
 import hashlib
@@ -9,6 +10,8 @@ import json
 import os
 import shutil
 import tempfile
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,8 +59,94 @@ def write_report(path, data):
     atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False))
 
 
+class LockBusy(ValueError):
+    """O recurso está em uso por outra pessoa, janela ou computador."""
+
+
+class FileLock:
+    """Trava entre processos e computadores por arquivo exclusivo (`O_EXCL`), com recuperação de trava abandonada.
+
+    Funciona também em pasta de rede, onde várias pessoas revisam a mesma saída. Quem trava grava um token e
+    só remove a trava se o token ainda for o seu. A trava com mais de `stale` segundos sem `touch()` é tratada
+    como abandonada (processo encerrado à força) e retomada. Limite conhecido: dois processos que vissem a
+    mesma trava vencer no mesmo instante poderiam ambos retomá-la; a janela é de milissegundos e só existe
+    depois de uma queda.
+    """
+
+    def __init__(self, path, timeout=0.0, stale=300.0, busy_message='Recurso em uso por outra instância.'):
+        self.path, self.timeout, self.stale, self.busy_message = Path(path), timeout, stale, busy_message
+        self.token = uuid.uuid4().hex
+
+    def acquire(self):
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try: fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                if self._take_over_if_stale(): continue
+                if time.monotonic() >= deadline: raise LockBusy(self.busy_message) from None
+                time.sleep(0.05); continue
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                stream.write(json.dumps({'token': self.token, 'pid': os.getpid(), 'since': datetime.now(timezone.utc).isoformat()}))
+            return self
+
+    def _take_over_if_stale(self):
+        try: age = time.time() - self.path.stat().st_mtime
+        except FileNotFoundError: return True   # liberada entre a tentativa e a leitura: tenta de novo
+        except OSError: return False
+        if age <= self.stale: return False
+        grave = self.path.with_name(f'{self.path.name}.{uuid.uuid4().hex}.stale')
+        try: os.replace(self.path, grave)       # só um dos concorrentes consegue renomear
+        except OSError: return False
+        grave.unlink(missing_ok=True)
+        return True
+
+    def touch(self):
+        """Sinal de vida de um lote longo: mantém a trava fora do prazo de abandono."""
+        try: os.utime(self.path)
+        except OSError: pass
+
+    def release(self):
+        try:
+            if json.loads(self.path.read_text(encoding='utf-8')).get('token') == self.token: self.path.unlink()
+        except (OSError, ValueError): pass
+
+    def __enter__(self): return self.acquire()
+    def __exit__(self, *exc): self.release(); return False
+
+
+class SourceRegistry:
+    """Memória de origem do lote incremental (`registro_origens.jsonl`, uma linha JSON por arquivo analisado).
+
+    Guarda, para cada origem (caminho local ou URL), tamanho, data de modificação, SHA-256, destino e relatório.
+    Permite que repetir o lote sobre a mesma pasta ou lista de URLs ignore o que não mudou em vez de empilhar
+    cópias e relatórios de duplicados. Só acrescenta linhas; linhas ilegíveis (queda no meio da gravação) são ignoradas.
+    """
+    NAME = 'registro_origens.jsonl'
+
+    def __init__(self, root):
+        self.path = Path(root) / self.NAME
+        self.entries = {}
+        try: lines = self.path.read_text(encoding='utf-8', errors='replace').splitlines()
+        except FileNotFoundError: lines = []
+        for line in lines:
+            try: entry = json.loads(line)
+            except ValueError: continue
+            if isinstance(entry, dict) and isinstance(entry.get('origem'), str): self.entries[entry['origem']] = entry   # a última linha vale
+
+    def get(self, origin): return self.entries.get(origin)
+
+    def remember(self, origin, size, mtime_ns, sha256, status, report_id):
+        entry = {'origem': origin, 'tamanho': size, 'mtime_ns': mtime_ns, 'sha256': sha256, 'status': status,
+                 'relatorio': report_id, 'quando': datetime.now(timezone.utc).isoformat()}
+        with self.path.open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(entry) + '\n')   # ensure_ascii: nomes com bytes inválidos também são gravados
+        self.entries[origin] = entry
+
+
 class ReviewStore:
     """Gerencia relatórios existentes e decisões documentais auditáveis."""
+    LOCK_TIMEOUT = 10   # segundos esperando outra pessoa terminar de decidir o mesmo documento
+
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.reports = self.root / 'relatorios'
@@ -104,7 +193,7 @@ class ReviewStore:
             raise ValueError('Integridade falhou: PDF mudou desde a análise.')
         return path
 
-    def decide(self, report_path, status, reviewer, reason):
+    def decide(self, report_path, status, reviewer, reason, expected_status=None):
         """Reclassifica com cópia verificada; mantém eventos no mesmo relatório.
 
         Aprovação libera somente o texto filtrado já existente. Não restaura
@@ -114,12 +203,22 @@ class ReviewStore:
         texto nunca fique disponível enquanto o documento é bloqueado, mas, se a decisão falhar depois
         (disco cheio, arquivo em uso, relatório não gravado), o TXT anterior é restaurado: um relatório
         "aprovados" nunca fica sem o texto que o acompanha.
+
+        A decisão é serializada por uma trava do relatório (várias pessoas ou janelas na mesma saída): a segunda
+        espera a primeira terminar e lê o estado já atualizado. `expected_status` é o destino que quem decide
+        VIU; se outra pessoa já mudou o documento, a decisão é recusada em vez de sobrescrever em silêncio.
         """
         report_path = Path(report_path).resolve()
         if report_path.parent != self.reports.resolve(): raise ValueError('Relatório fora da saída.')
         if status not in ('aprovados','rejeitados','verificacao_humana'): raise ValueError('Destino inválido.')
         if not reviewer.strip() or not reason.strip(): raise ValueError('Informe revisor e justificativa.')
+        lock = FileLock(report_path.with_suffix('.lock'), timeout=self.LOCK_TIMEOUT, busy_message='Outra pessoa está decidindo este documento agora. Tente de novo em instantes.')
+        with lock: return self._decide_locked(report_path, status, reviewer, reason, expected_status)
+
+    def _decide_locked(self, report_path, status, reviewer, reason, expected_status):
         data = self.load_report(report_path)
+        if expected_status is not None and data.get('status') != expected_status:
+            raise ValueError(f'Este documento já foi decidido por outra pessoa (agora está em "{data.get("status")}"). Atualize a tabela e reavalie.')
         if not isinstance(data.get('file'), str) or not isinstance(data.get('status'), str): raise ValueError('Relatório sem arquivo ou destino válido.')
         source = self.checked_pdf(data)
         if data.get('status') in ('quarentena','duplicados'):

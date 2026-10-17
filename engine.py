@@ -8,16 +8,16 @@ import os, re, json, shutil, tempfile, threading, socket, ipaddress
 import unicodedata, uuid, time, multiprocessing, math, bisect, contextlib
 from collections import Counter
 from itertools import islice
-from workflow import sha256_file, atomic_write, write_report, limit_memory as _limit_memory, CHILD_MEMORY_MB
+from workflow import sha256_file, atomic_write, write_report, limit_memory as _limit_memory, CHILD_MEMORY_MB, FileLock, SourceRegistry
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from datetime import datetime, timezone
 import requests
 import urllib3.util.connection as _urllib3_connection
 import pymupdf
 import numpy as np
 
-APP_VERSION = '2.7'
+APP_VERSION = '2.8'
 DOWNLOAD_DEADLINE_S = 90   # prazo total de um download, mesmo que o servidor "goteje" bytes
 MANIFEST_DEADLINE_S = 30   # prazo total para ler o manifesto de URLs (mesma defesa contra o gotejamento)
 LEGIBLE_RATIO = 3.0        # contraste (na página já renderizada) a partir do qual o texto é legível
@@ -537,7 +537,7 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
             try: scratch = stack.enter_context(pymupdf.open(path))
             except Exception: scratch = None
         inspection_parts = [str(v) for v in doc.metadata.values() if v] + [doc.get_xml_metadata()]
-        structural_checks(doc, alerts)
+        inspection_parts.extend(structural_checks(doc, alerts))
         for pn, page in enumerate(doc, 1):
             # Inspecionar também anotações e campos, ausentes da extração comum.
             for annot in page.annots() or ():
@@ -667,22 +667,83 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
     unique.reverse()
     return scrub({'alerts':unique, 'text':text, 'metrics':metrics})
 
-def structural_checks(doc, alerts):
-    """Sinaliza ações/layers sem executar JS, Launch ou anexos do documento.
+# Nomes de ação que executam algo ou enviam dados. No texto canônico do MuPDF os escapes de nome (#xx) já vêm
+# resolvidos: `/Java#53cript` chega aqui como `/JavaScript`, então a ofuscação por escape não escapa da busca.
+_ACTIVE_ACTIONS = re.compile(r'/(JavaScript|JS|Launch|SubmitForm|ImportData)(?![\w#.\-])')
+_OBJECT_SCAN_CAP = 65_536     # caracteres lidos por objeto: um objeto gigante não trava a varredura
+_STRINGS_BUDGET = 200_000     # total de caracteres de strings internas enviadas à busca de frases
+_ESCAPE = re.compile(r'\\([0-7]{1,3}|.)', re.S)
+_SIMPLE_ESCAPES = {'n': '\n', 'r': '\r', 't': '\t', 'b': '\b', 'f': '\f'}
+_SEPARATORS = re.compile(r'[+_\-./=&?#:;,|~]+')
+_LONG_NAME = re.compile(r'/([^\s/<>\[\]()%]{16,})')   # nomes longos (chaves de destinos antigos, etc.) também podem carregar frases
 
-    Inspeção de chaves e valores estruturais é conservadora. Objetos órfãos
-    também podem produzir alertas: este mecanismo não é um antivírus.
+
+def _loosen(value):
+    """Versão da string sem codificação de URL e sem separadores: `ignore+all_previous%20instructions` vira frase."""
+    return _SEPARATORS.sub(' ', unquote(value))
+
+
+def _unescape_pdf_string(text):
+    """Decodifica escapes de uma string literal PDF e o prefixo de UTF-16/UTF-8 (BOM)."""
+    def one(m):
+        g = m.group(1)
+        if g[0] in '01234567': return chr(int(g, 8) & 0xFF)
+        return _SIMPLE_ESCAPES.get(g, '' if g in ('\n', '\r') else g)
+    out = _ESCAPE.sub(one, text)
+    if out[:2] == '\xfe\xff': return out[2:].encode('latin-1', 'replace').decode('utf-16-be', 'replace')
+    if out[:2] == '\xff\xfe': return out[2:].encode('latin-1', 'replace').decode('utf-16-le', 'replace')
+    if out[:3] == '\xef\xbb\xbf': return out[3:].encode('latin-1', 'replace').decode('utf-8', 'replace')
+    return out
+
+
+def _pdf_strings(obj):
+    """Separa o texto canônico de um objeto PDF em (resto sem strings, strings literais decodificadas).
+
+    Aceita parênteses aninhados e escapes, como a sintaxe PDF. O MuPDF já imprime strings hexadecimais como literais.
+    """
+    rest, found, i, n = [], [], 0, len(obj)
+    while i < n:
+        start = obj.find('(', i)
+        if start < 0: rest.append(obj[i:]); break
+        rest.append(obj[i:start]); rest.append(' ')
+        depth, j = 1, start + 1
+        while j < n and depth:
+            ch = obj[j]
+            if ch == '\\': j += 2; continue
+            depth += (ch == '(') - (ch == ')'); j += 1
+        found.append(_unescape_pdf_string(obj[start + 1:j - 1] if depth == 0 else obj[start + 1:j])); i = j
+    return ''.join(rest), found
+
+
+def structural_checks(doc, alerts):
+    """Sinaliza ações ativas e camadas, e devolve as strings internas do PDF para a busca de frases.
+
+    Percorre o texto canônico de cada objeto, não só as chaves de primeiro nível: um dicionário de ação embutido
+    (`/OpenAction << /S /JavaScript ... >>`, a forma que o Acrobat grava) não tem objeto próprio e passava sem
+    alerta. As strings (títulos de marcadores, URIs de links, chaves personalizadas, rótulos de página, nomes de
+    destinos, textos alternativos...) são devolvidas para a mesma busca de frases já aplicada ao texto, em vez de
+    enumerar canal por canal. Nada é executado. Não substitui um antivírus.
     """
     if doc.xref_length() > 30_000: raise ValueError('PDF excede 30 mil objetos.')
-    for xref in range(1, doc.xref_length()):
-        
-        try: keys = doc.xref_get_keys(xref)
-        except RuntimeError: continue  # Xref livre não é um objeto utilizável.
-        action = doc.xref_get_key(xref, 'S')[1] if 'S' in keys else ''
-        if 'JS' in keys or action in ('/JavaScript','/Launch','/SubmitForm','/ImportData'):
-            alerts.append({'type':'acao_ativa','severity':'review','detail':f'Ação ativa em objeto {xref}: {action or "JS"}.'})
+    strings, budget, seen = [], _STRINGS_BUDGET, set()
+    for xref in (-1, *range(1, doc.xref_length())):   # -1 é o trailer, onde também cabem chaves personalizadas
+        try: keys = doc.xref_get_keys(xref); obj = doc.xref_object(xref, compressed=False)
+        except (RuntimeError, ValueError): continue  # Xref livre não é um objeto utilizável.
+        rest, found = _pdf_strings(obj[:_OBJECT_SCAN_CAP])
+        action = _ACTIVE_ACTIONS.search(rest)
+        if action:
+            alerts.append({'type':'acao_ativa','severity':'review','detail':f'Ação ativa em objeto {xref}: /{action.group(1)}.'})
         if 'OCProperties' in keys:
             alerts.append({'type':'camadas_opcionais','severity':'review','detail':'Camadas opcionais podem mudar a visibilidade.'})
+        candidates = [v for v in found if len(v) >= 8]   # strings curtas não carregam instrução
+        candidates += _LONG_NAME.findall(rest)
+        for value in candidates:
+            if budget <= 0: break
+            if value in seen: continue
+            seen.add(value); strings.append(value); budget -= len(value)
+            loose = _loosen(value)
+            if loose != value: strings.append(loose); budget -= len(loose)
+    return strings
 
 
 def _analyze_child(connection, path, options):
@@ -750,6 +811,22 @@ class Pipeline:
             if not file.is_symlink() and file.parent.name in INDEXED and (self.root / 'relatorios' / (file.stem + '.json')).is_file():
                 try: self.hashes[sha256_file(file)] = str(file)
                 except OSError: pass
+
+    def supersede_quarantine(self, report_id, digest):
+        """Remove a cópia e o relatório de uma tentativa anterior em quarentena do MESMO conteúdo, já substituída.
+
+        A quarentena é reanalisada a cada execução; sem isso cada tentativa empilharia mais uma cópia do PDF
+        (possivelmente hostil) e mais um relatório. Só remove com SHA-256 igual, status "quarentena", sem histórico
+        de decisão humana e com o PDF dentro da pasta de quarentena; qualquer dúvida mantém tudo.
+        """
+        report = self.root / 'relatorios' / f'{report_id}.json'
+        try:
+            data = json.loads(report.read_text(encoding='utf-8')); pdf = Path(data.get('file', '')).resolve()
+        except (OSError, ValueError, TypeError): return False
+        if data.get('status') != 'quarentena' or data.get('sha256') != digest or data.get('history'): return False
+        if pdf.parent != (self.root / 'quarentena').resolve() or Path(report).name != f'{report_id}.json': return False
+        pdf.unlink(missing_ok=True); report.unlink(missing_ok=True); report.with_suffix('.txt').unlink(missing_ok=True)
+        return True
 
     def process(self, source):
         """Classifica um arquivo; qualquer falha de análise impede liberação."""
@@ -857,31 +934,62 @@ def run_batch(params, url='', local='', recursive=False, cancel=None, report=Non
     `params` são os argumentos de `Pipeline`. `cancel` é um objeto com `is_set()` (ex.:
     threading.Event). `report(tipo, valor)` recebe 'log', 'total' e 'progress'. Erros
     individuais não abortam o lote. Devolve um Counter com o destino de cada arquivo.
+
+    O lote é incremental: um arquivo (ou URL) já analisado, sem alteração e com o relatório ainda existente é
+    ignorado (contado em 'ja_processados'), a menos que `reprocess` esteja ligado. Uma trava impede dois lotes
+    simultâneos na mesma pasta de saída.
     """
     notify = report or (lambda kind, value: None)
     report = lambda kind, value: notify(kind, scrub(value) if kind == 'log' else value)
     cancel = cancel or threading.Event()
     validate_params(params)
-    pipe = Pipeline(**params); sources = []; destinations = Counter()
+    pipe = Pipeline(**params)
+    lock = FileLock(pipe.root / '.lote.lock', timeout=0, stale=300, busy_message=(
+        'Já existe um lote em andamento nesta pasta de saída (outra janela ou outro computador). Aguarde o término. '
+        'Se nenhum lote estiver rodando (queda anterior), aguarde 5 minutos ou apague o arquivo .lote.lock da pasta de saída.'))
+    lock.acquire()
+    try: return _run_batch_locked(pipe, lock, url, local, recursive, cancel, report)
+    finally: lock.release()
+
+
+def _run_batch_locked(pipe, lock, url, local, recursive, cancel, report):
+    sources = []; destinations = Counter(); registry = SourceRegistry(pipe.root)   # sources: (arquivo, origem, baixado)
     if local:
         folder = Path(local).resolve()
         if not folder.is_dir(): raise ValueError('Pasta de origem inválida.')
         candidates = [p for p in (folder.rglob('*') if recursive else folder.iterdir()) if p.suffix.lower() == '.pdf' and p.is_file()]
         for p in candidates:
             if p.is_symlink() or not p.resolve().is_relative_to(folder): report('log', f'{p.name}: ignorado (link simbólico ou fora da pasta de origem)')
-        sources.extend(p for p in candidates if not p.is_symlink() and p.resolve().is_relative_to(folder) and pipe.root not in p.resolve().parents)
+        sources.extend((p, str(p.resolve()), False) for p in candidates if not p.is_symlink() and p.resolve().is_relative_to(folder) and pipe.root not in p.resolve().parents)
     for link in (manifest_urls(url, cancel) if url else []):
         if cancel.is_set(): break
+        lock.touch()
         dest = pipe.root / 'originais' / ('download_' + uuid.uuid4().hex + '.pdf')
-        try: download_pdf(link, dest, cancel); sources.append(dest)
+        try: download_pdf(link, dest, cancel); sources.append((dest, link, True))
         except Exception as exc: report('log', 'Download falhou: ' + str(exc))
     report('total', len(sources))
-    for index, path in enumerate(sources, 1):
+    skipped = 0
+    for index, (path, origin, downloaded) in enumerate(sources, 1):
         if cancel.is_set(): break
+        lock.touch()
         try:
-            status, target = pipe.process(path); destinations[status] += 1
-            report('log', f'{path.name} → {status} | relatório: {target.stem}.json')
+            stat = path.stat(); entry = registry.get(origin)
+            unchanged = bool(entry) and entry.get('tamanho') == stat.st_size and entry.get('mtime_ns') == stat.st_mtime_ns
+            digest = entry['sha256'] if unchanged and not downloaded else sha256_file(path)
+            if (not pipe.reprocess and entry and digest == entry.get('sha256') and entry.get('status') != 'quarentena'
+                    and (pipe.root / 'relatorios' / f"{entry.get('relatorio')}.json").is_file()):
+                skipped += 1; destinations['ja_processados'] += 1
+                if downloaded: path.unlink(missing_ok=True)   # o conteúdo já está guardado: não acumula download repetido
+                elif not unchanged: registry.remember(origin, stat.st_size, stat.st_mtime_ns, digest, entry['status'], entry['relatorio'])
+                report('log', f'{path.name}: já processado ({entry["status"]}), sem alteração; ignorado')
+            else:
+                status, target = pipe.process(path); destinations[status] += 1
+                registry.remember(origin, stat.st_size, stat.st_mtime_ns, digest, status, target.stem)
+                if entry and entry.get('status') == 'quarentena' and entry.get('sha256') == digest and entry.get('relatorio') != target.stem:
+                    pipe.supersede_quarantine(entry['relatorio'], digest)   # tentativa anterior substituída por esta
+                report('log', f'{path.name} → {status} | relatório: {target.stem}.json')
         except Exception as exc: report('log', f'{path.name}: erro — {exc}')
         report('progress', index)
+    if skipped: report('log', f'{skipped} arquivo(s) já processado(s) e sem alteração foram ignorados. Marque "Reanalisar duplicados" para analisá-los de novo.')
     report('log', 'Interrompido.' if cancel.is_set() else 'Lote concluído.')
     return destinations

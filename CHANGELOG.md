@@ -1,3 +1,25 @@
+# Versão 2.8
+
+Segunda bateria, focada no que a 2.7 não tocou: canais de ataque, escala, concorrência e uso repetido. Como na 2.7, cada defeito foi reproduzido antes de corrigir e tem teste de regressão verificado por mutação (remover o mecanismo faz o teste falhar). Duas das correções não cabem em remendos pontuais e viraram funcionalidades.
+
+Defeitos confirmados:
+
+- **Ações ativas embutidas passavam sem alerta (segurança):** `structural_checks` só olhava as chaves de primeiro nível de cada objeto, então `/OpenAction << /S /JavaScript ... >>` embutido no catálogo ou numa página, `/A << /S /Launch ... >>` num link, `/SubmitForm` e a árvore de nomes de JavaScript (5 de 6 variantes) não geravam `acao_ativa`; só a forma com objeto próprio era vista. Agora a varredura lê o texto canônico de cada objeto (inclusive o trailer), onde `/Java#53cript` já chega resolvido.
+- **Frases em canais internos sem cobertura:** títulos de marcadores, URIs de links, rótulos de página, nomes de anexos, destinos nomeados e chaves personalizadas de `/Info` não eram inspecionados. As strings internas do PDF (com decodificação de escapes e UTF-16, limite por objeto e orçamento total) e uma versão sem codificação de URL e sem separadores (`ignore+all_previous%20instructions`) passam pela mesma busca de frases. Custo no pior caso testado (29 mil objetos): de 0,25 s para 0,63 s.
+- **Repetir o lote empilhava lixo:** cada nova execução sobre a mesma pasta acrescentava uma cópia do PDF e um relatório por arquivo em `duplicados` (4 execuções de 3 currículos: 9 cópias de lixo e 12 linhas na fila em vez de 3), um `originais/download_<uuid>.pdf` por rodada nas URLs repetidas, e uma nova cópia em quarentena a cada tentativa de um arquivo que falha.
+- **Decisões simultâneas corrompiam o estado (30 de 30 tentativas):** dois revisores no mesmo documento deixavam o PDF em duas pastas, uma cópia órfã sem relatório e só uma das decisões no histórico.
+
+Funcionalidades novas (um remendo não resolveria):
+
+- **Lote incremental (`registro_origens.jsonl`):** a saída lembra de cada origem (caminho ou URL, tamanho, data, SHA-256, relatório). Origem inalterada e com relatório existente é ignorada (`ja_processados`); conteúdo alterado é reanalisado; o mesmo conteúdo com outro nome segue sendo `duplicados`; a quarentena continua sendo reanalisada a cada execução (como a ajuda da tela já dizia), e a tentativa anterior do mesmo conteúdo é substituída em vez de acumulada. Só se remove cópia em quarentena com SHA-256 igual, sem decisão humana e dentro da pasta de quarentena. Um arquivo corrigido (conteúdo novo) mantém a cópia antiga como evidência. **Reanalisar duplicados** força tudo.
+- **Travas e decisão desatualizada:** `FileLock` (criação exclusiva, token de dono, recuperação de trava abandonada, sinal de vida) protege cada relatório em `decide()` e a pasta de saída em `run_batch` (o segundo lote é recusado com mensagem). A tela passa o status que o revisor viu (`expected_status`): se outra pessoa decidiu no meio, a decisão é recusada com aviso em vez de sobrescrever em silêncio.
+
+Verificado e **sem problema** (para não repetir a busca): escala (10 mil currículos: 0,7 s para indexar e 0,5 s para listar; o custo é linear) e bomba gzip em `Content-Encoding` (401 KB que viram 400 MB são recusados em 0,0 s, porque o teto de 15 MB vale para o corpo já decodificado; o teste de regressão só passou a existir agora).
+
+Limites conhecidos: a verificação rápida do lote incremental usa tamanho e data (um arquivo trocado por outro de mesmo tamanho e data passa); as travas dependem de criação exclusiva de arquivo no sistema de arquivos (não testado em pasta de rede); a retomada de trava abandonada tem uma janela de milissegundos se dois processos a virem vencer no mesmo instante.
+
+Testes: 127 → 157 (7 de interface real). Verificado em Python 3.11, 3.12 e 3.13.
+
 # Versão 2.7
 
 Nova bateria (rede, Unicode, revisão, fuzz). Cada defeito abaixo foi **reproduzido antes de corrigir** e tem teste de regressão em `test_security.py`, verificado por mutação (reintroduzir o defeito faz o teste falhar). A detecção não mudou: as três avaliações têm saída idêntica à da 2.6.

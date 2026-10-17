@@ -79,6 +79,8 @@ As configurações podem ser salvas e carregadas em JSON. O lote mostra progress
 
 Pastas adicionais servem para organização manual. Reanálises geram avaliações independentes, sem sobrescrever nem revogar automaticamente decisões anteriores.
 
+**Lotes repetidos são incrementais.** A saída guarda um `registro_origens.jsonl` (caminho ou URL, tamanho, data, SHA-256 e relatório). Repetir o lote sobre a mesma pasta ou lista de URLs ignora o que não mudou e ainda tem relatório, sem empilhar cópias em `duplicados` nem downloads em `originais`. Um arquivo alterado é analisado de novo; o mesmo conteúdo com outro nome continua sendo `duplicados`; a quarentena é reanalisada a cada execução e a tentativa anterior do mesmo conteúdo é substituída em vez de acumulada. Para forçar tudo, marque **Reanalisar duplicados**. A verificação rápida usa tamanho e data de modificação; um arquivo trocado por outro de mesmo tamanho e mesma data passaria despercebido.
+
 ## 🌐 Entrada pela internet
 
 Informe uma URL HTTPS direta de PDF ou uma URL terminada em `.json` com um manifesto:
@@ -112,7 +114,7 @@ Com as dependências instaladas:
 python -m unittest discover -v
 ```
 
-A versão 2.7 passou por **127 testes automatizados** (6 deles usam a interface real e são ignorados em ambientes sem tela), cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV, downloads simulados, DNS rebinding e servidor que goteja bytes (com servidores locais reais), Unicode hostil e nomes de arquivo inválidos. O motor de análise importa e roda sem Tkinter.
+A versão 2.8 passou por **157 testes automatizados** (7 deles usam a interface real e são ignorados em ambientes sem tela), cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV, downloads simulados, DNS rebinding e servidor que goteja bytes (com servidores locais reais), Unicode hostil e nomes de arquivo inválidos, ações e canais internos do PDF, travas entre instâncias e lote incremental. O motor de análise importa e roda sem Tkinter.
 
 A interface ainda não foi validada visualmente no ambiente de desenvolvimento. Downloads foram testados com respostas simuladas, não com um servidor externo real.
 
@@ -127,14 +129,14 @@ A interface ainda não foi validada visualmente no ambiente de desenvolvimento. 
 - Caracteres invisíveis comuns em línguas e emoji (marcas de direção em hebraico e árabe, ZWNJ e ZWJ em persa, hindi e emoji, hífen suave) não geram alerta; os suspeitos (espaço de largura zero entre letras latinas, bidi override, tags Unicode, sequências) geram. Mensagens escritas com tags Unicode invisíveis são decodificadas antes da busca de frases.
 - Links simbólicos na pasta de entrada são ignorados, e arquivos que resolvem para fora dela também.
 - Os processos que leem PDFs (análise e prévia da revisão) têm teto de 2 GB de memória virtual em Linux e macOS (um PDF de 14 KB pode inflar para gigabytes ao ser interpretado); no Windows não há esse teto e vale apenas o prazo.
-- Dois lotes ao mesmo tempo na mesma pasta de saída não se coordenam: ambos analisam tudo, sem corromper nada.
+- Dois lotes não rodam ao mesmo tempo na mesma pasta de saída: o segundo é recusado com uma mensagem (trava `.lote.lock`, retomada sozinha após 5 minutos sem sinal de vida). Decisões de revisão simultâneas sobre o mesmo documento são serializadas, e quem decide com a tela desatualizada recebe um aviso em vez de sobrescrever a decisão de outra pessoa. As travas dependem de o sistema de arquivos honrar a criação exclusiva de arquivos (SMB e NFS atuais honram, mas não foi testado aqui) e não substituem controle de acesso.
 - Camadas OCR invisíveis e recursos legítimos de acessibilidade podem gerar alertas.
 - Imagens, gradientes, recortes e efeitos de composição podem confundir a inspeção visual.
 - A inspeção de ações não substitui um antivírus; subprocessos não são uma sandbox do sistema operacional.
 - A extração pode perder a ordem lógica de documentos com várias colunas.
 - Texto e relatórios permanecem dados não confiáveis. Uma integração com IA deve manter esses dados separados de instruções e permissões de ferramentas.
 
-Use uma instância por pasta de saída. O histórico é um registro local, sem assinatura digital ou autenticação do nome do revisor.
+O histórico é um registro local, sem assinatura digital ou autenticação do nome do revisor.
 
 ## 🧩 Organização do código
 
@@ -182,6 +184,6 @@ python -m evaluation.run_pdfs         # ataques escondidos, injeção visível e
 python -m evaluation.run_realistic    # PDFs de reportlab (e LibreOffice/wkhtmltopdf, se instalados)
 ```
 
-Resultado da versão 2.7 (os mesmos números da 2.6: as correções desta versão não mudam a detecção): frases do conjunto inédito, **22 de 30** detectadas contra 4 de 30 da v2.0, com 0 falsos positivos em 40 linhas legítimas; 27 de 27 ataques escondidos, 12 de 12 sinalizações e 13 de 13 layouts legítimos nos PDFs sintéticos. O conjunto de desenvolvimento serve apenas como teste de regressão, porque os padrões foram ajustados olhando para ele; só o conjunto inédito mede generalização. Detalhes em `evaluation/README.md`. A integração contínua roda esses scripts com `--check` e falha se a qualidade piorar.
+Resultado da versão 2.8 (os mesmos números da 2.6: a detecção de frases não mudou; a varredura estrutural acrescentou canais internos e ações embutidas, sem alterar nenhuma avaliação): frases do conjunto inédito, **22 de 30** detectadas contra 4 de 30 da v2.0, com 0 falsos positivos em 40 linhas legítimas; 27 de 27 ataques escondidos, 12 de 12 sinalizações e 13 de 13 layouts legítimos nos PDFs sintéticos. O conjunto de desenvolvimento serve apenas como teste de regressão, porque os padrões foram ajustados olhando para ele; só o conjunto inédito mede generalização. Detalhes em `evaluation/README.md`. A integração contínua roda esses scripts com `--check` e falha se a qualidade piorar.
 
 O código está comentado em português. Para contribuir, descreva o caso observado, use um PDF sintético sem dados pessoais e adicione um teste quando a mudança corrigir um comportamento relevante.

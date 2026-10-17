@@ -134,7 +134,7 @@ class ReviewPanel(ttk.Frame if ttk else object):
     def decide(self,status):
         """Justificativa e revisor obrigatórios; atualizar histórico após decisão."""
         try:
-            path,_=self.selected();self.store().decide(path,status,self.reviewer.get(),self.reason.get())
+            path,data=self.selected();self.store().decide(path,status,self.reviewer.get(),self.reason.get(),expected_status=data.get('status'))
             self.refresh();self.reason.set('')
         except Exception as exc: messagebox.showerror('Revisão não aplicada',str(exc))
 

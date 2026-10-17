@@ -1,4 +1,4 @@
-# Currículo Guard — versão 2.7
+# Currículo Guard — versão 2.8
 
 Aplicativo desktop Python 3.11+ com Tkinter. Código comentado em português. Extraia todos os arquivos do ZIP juntos: app.py depende de engine.py, workflow.py e review_ui.py.
 
@@ -36,7 +36,7 @@ Manifesto: lista JSON com URLs absolutas de PDFs, até 100 entradas. Não acessa
 - originais: downloads preservados.
 - relatorios: JSON com motivos, amostras, métricas e configuração; TXT só para documentos aprovados.
 
-O texto filtrado de arquivos sinalizados pode aparecer no relatório JSON para auditoria. Nunca envie relatórios à IA como instruções. Reprocessar arquivo já presente gera duplicado por padrão. O checkbox Reanalisar duplicados cria uma avaliação nova e independente, sem sobrescrever a anterior. Ele não revoga automaticamente decisões anteriores: use a fila de revisão para bloqueá-las, ou uma saída nova se quiser comparar configurações isoladamente.
+O texto filtrado de arquivos sinalizados pode aparecer no relatório JSON para auditoria. Nunca envie relatórios à IA como instruções. Repetir o lote sobre a mesma pasta ou lista de URLs ignora o que já foi analisado e não mudou (registro_origens.jsonl na saída); o mesmo conteúdo com outro nome gera duplicado. O checkbox Reanalisar duplicados força uma avaliação nova e independente, sem sobrescrever a anterior. Ele não revoga automaticamente decisões anteriores: use a fila de revisão para bloqueá-las, ou uma saída nova se quiser comparar configurações isoladamente.
 
 ## Limites reais
 
@@ -51,7 +51,7 @@ Não há OCR integrado nem garantia de detectar toda injeção de prompt. Extra�
 - Caracteres invisíveis comuns em línguas e emoji (marcas de direção em hebraico e árabe, ZWNJ e ZWJ em persa, hindi e emoji, hífen suave) não geram alerta; os suspeitos (espaço de largura zero entre letras latinas, bidi override, tags Unicode, sequências) geram. Mensagens escritas com tags Unicode invisíveis são decodificadas antes da busca de frases.
 - Links simbólicos na pasta de entrada são ignorados, e arquivos que resolvem para fora dela também.
 - O processo de análise tem teto de 2 GB de memória virtual em Linux e macOS (um PDF de 14 KB pode inflar para gigabytes ao ser interpretado); no Windows não há esse teto e vale apenas o prazo.
-- Dois lotes ao mesmo tempo na mesma pasta de saída não se coordenam: ambos analisam tudo, sem corromper nada.
+- Trava de lote: se um lote travar de vez, a trava `.lote.lock` é retomada sozinha após 5 minutos sem sinal de vida; também pode ser apagada à mão se nenhum lote estiver rodando.
 
 O contraste mínimo padrão é 2,0:1; configurações salvas na versão 2.0 mantêm o valor antigo (1,2:1) até serem ajustadas. Branco no branco e outros contrastes baixos são excluídos do texto filtrado e revisados por padrão. Para bloqueio automático documental, marque a regra de baixo contraste como rejeitados e habilite o checkbox global. Isso também afeta outros contrastes abaixo do limite, pois não há prova exata de igualdade com o fundo real.
 
@@ -65,7 +65,7 @@ Execute PDFs externos em ambiente isolado, com dependências atualizadas. O IP �
 python -m unittest -v
 ```
 
-127 testes automatizados: casos originais de filtragem; preservação de relatórios em duplicatas e reanálises; decisões com histórico; revogação do TXT; alteração/caminho do PDF; campos auxiliares; normalização Unicode; ações ativas; limites de páginas e tempo; geração real de PNG de prévia; CSV; arquivos corrompidos; downloads simulados e limpeza de temporários; texto fora da área visível; fundo heterogêneo; alteração entre análise/cópia e symlinks de fuga; contraste contra o fundo real (texto sobre caixa do mesmo tom, réguas, selos, páginas rotacionadas), cobertura fragmentada, gradientes, frases de injeção e legítimas, letras separadas e homóglifos; reanálise de quarentena; importação sem Tkinter; download com gotejamento (prazo e cancelamento); bombas de memória; links simbólicos; PDF sem relatório; cabeçalho com BOM; destaque translúcido e cobertura parcial; caracteres invisíveis; tags Unicode; manifesto sem proxy de ambiente; relatórios malformados; motor sem Tkinter, `run_batch` e `validate_params`; ícone e cabeçalho; rótulos sem corte e alinhados; fluxo completo pela interface real (lote, revisão, CSV, configuração); DNS rebinding contra servidor local real, NAT64 e IPv4 embutido, manifesto com prazo e cancelamento, Unicode hostil (ToUnicode com meio par UTF-16), nome de arquivo em Latin-1, falhas de cópia e gravação em `decide()` e teto de memória da prévia.
+157 testes automatizados: casos originais de filtragem; preservação de relatórios em duplicatas e reanálises; decisões com histórico; revogação do TXT; alteração/caminho do PDF; campos auxiliares; normalização Unicode; ações ativas; limites de páginas e tempo; geração real de PNG de prévia; CSV; arquivos corrompidos; downloads simulados e limpeza de temporários; texto fora da área visível; fundo heterogêneo; alteração entre análise/cópia e symlinks de fuga; contraste contra o fundo real (texto sobre caixa do mesmo tom, réguas, selos, páginas rotacionadas), cobertura fragmentada, gradientes, frases de injeção e legítimas, letras separadas e homóglifos; reanálise de quarentena; importação sem Tkinter; download com gotejamento (prazo e cancelamento); bombas de memória; links simbólicos; PDF sem relatório; cabeçalho com BOM; destaque translúcido e cobertura parcial; caracteres invisíveis; tags Unicode; manifesto sem proxy de ambiente; relatórios malformados; motor sem Tkinter, `run_batch` e `validate_params`; ícone e cabeçalho; rótulos sem corte e alinhados; fluxo completo pela interface real (lote, revisão, CSV, configuração); DNS rebinding contra servidor local real, NAT64 e IPv4 embutido, manifesto com prazo e cancelamento, Unicode hostil (ToUnicode com meio par UTF-16), nome de arquivo em Latin-1, falhas de cópia e gravação em `decide()` e teto de memória da prévia.
 
 Interface Tkinter ainda sem validação visual neste ambiente. Downloads foram testados com respostas simuladas e com servidores locais, não com servidor externo real: TLS e validação de certificado não têm cobertura automatizada. Os testes não comprovam detecção de todos os ataques.
 
@@ -83,6 +83,6 @@ Interface Tkinter ainda sem validação visual neste ambiente. Downloads foram t
 
 ## Histórico de revisão e limites operacionais
 
-Relatórios JSON têm identificadores únicos, SHA-256, configuração, versão e eventos de revisão. As gravações são atômicas individualmente; movimentação de PDF, JSON e TXT não é uma transação única. Interrupção do SO pode exigir conciliação manual. Trabalhe com uma instância do aplicativo por pasta de saída; não há bloqueio entre processos concorrentes. Histórico é registro local, não assinatura digital nem autenticação do nome do revisor. PDF original de entrada não é alterado; cópias organizadas são movidas na revisão.
+Relatórios JSON têm identificadores únicos, SHA-256, configuração, versão e eventos de revisão. As gravações são atômicas individualmente; movimentação de PDF, JSON e TXT não é uma transação única. Interrupção do SO pode exigir conciliação manual. Dois lotes não rodam ao mesmo tempo na mesma saída (o segundo é recusado) e decisões simultâneas sobre o mesmo documento são serializadas; se a tela estiver desatualizada, a decisão é recusada com aviso (clique Atualizar). Histórico é registro local, não assinatura digital nem autenticação do nome do revisor. PDF original de entrada não é alterado; cópias organizadas são movidas na revisão.
 
 Relatórios podem conter dados pessoais. CSV não contém texto integral nem amostras. Guarde a pasta de saída de acordo com as regras de acesso da sua organização.

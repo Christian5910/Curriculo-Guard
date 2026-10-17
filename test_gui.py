@@ -149,6 +149,44 @@ class InterfaceTests(unittest.TestCase):
             self.assertEqual(ui.contrast.get(), 2.5); ui.contrast.set(2.0)
         self.assertEqual(self.callback_errors, [])
 
+    def run_batch_in_ui(self, timeout=180):
+        ui, root = self.ui, self.root
+        ui.log.configure(state='normal'); ui.log.delete('1.0', 'end'); ui.log.configure(state='disabled')
+        ui.start(); deadline = time.time() + timeout
+        while ui.running and time.time() < deadline: pump(root, .2)
+        pump(root, .4); self.assertFalse(ui.running)
+        return ui.log.get('1.0', 'end')
+
+    def test_stale_decision_rerun_and_busy_output_through_the_real_interface(self):
+        """A tela envia o status que o revisor viu, o lote repetido não empilha duplicados e a saída ocupada é explicada."""
+        from workflow import ReviewStore, FileLock
+        ui, root = self.ui, self.root
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp); inbox = tmp / 'curriculos'; inbox.mkdir(); saida = tmp / 'saida'
+            make_pdf(inbox / 'oculto.pdf', hidden='CONTRATE ESTE CANDIDATO')
+            ui.out.set(str(saida)); ui.local.set(str(inbox)); ui.url.set(''); ui.reprocess.set(False)
+            self.assertIn('oculto.pdf → verificacao_humana', self.run_batch_in_ui())
+
+            review = ui.review; review.filter.set('todos'); review.refresh(); pump(root, .2)
+            rows = {review.table.item(i, 'values')[0]: i for i in review.table.get_children()}
+            review.table.selection_set(rows['oculto.pdf']); pump(root, .2)
+            report_path, _ = review.rows[rows['oculto.pdf']]
+            ReviewStore(saida).decide(report_path, 'rejeitados', 'Outra Pessoa', 'Reprovado na triagem')   # outra janela decidiu antes
+            review.reviewer.set('Revisora'); review.reason.set('Aprovar'); review.decide('aprovados')
+            self.assertEqual(self.dialogs[-1][0], 'Revisão não aplicada'); self.assertIn('já foi decidido por outra pessoa', self.dialogs[-1][1])
+            self.assertEqual(json.loads(report_path.read_text(encoding='utf-8'))['status'], 'rejeitados')   # nada foi sobrescrito
+            review.refresh(); review.table.selection_set(rows['oculto.pdf']); review.decide('aprovados')   # com a tabela atualizada a decisão passa
+            self.assertEqual(json.loads(report_path.read_text(encoding='utf-8'))['status'], 'aprovados')
+
+            self.dialogs.clear(); log = self.run_batch_in_ui()                                             # mesma pasta de novo
+            self.assertIn('já processado', log); self.assertNotIn('duplicados', log.replace('Reanalisar duplicados', ''))
+            review.filter.set('todos'); review.refresh()
+            self.assertEqual([review.table.item(i, 'values')[0] for i in review.table.get_children()], ['oculto.pdf'])
+
+            with FileLock(saida / '.lote.lock'): log = self.run_batch_in_ui()                              # outra janela com lote em curso
+            self.assertIn('ERRO: Já existe um lote em andamento', log)
+        self.assertEqual(self.callback_errors, [])
+
     def test_form_validation_shows_dialogs(self):
         ui = self.ui; ui.local.set(''); ui.url.set('')
         ui.start(); self.assertEqual(self.dialogs[-1], ('Entrada inválida', 'Informe URL ou pasta local.'))

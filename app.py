@@ -107,7 +107,7 @@ class App:
         help_text = (
             'APROVADOS: nenhum alerta nas verificações ativas; não garante ausência de ataque.\n\n'
             'VERIFICAÇÃO HUMANA: tamanho, contraste, opacidade, oclusão, comandos, senha, anexos ou falta de texto. OCR invisível legítimo também pode gerar alerta.\n\n'
-            'REJEITADOS: bloqueados da ingestão automática conforme suas regras, sem decisão sobre o candidato. QUARENTENA: PDF inválido ou falha (reanalisado na próxima execução). DUPLICADOS: mesmo SHA-256 já analisado.\n\n'
+            'REJEITADOS: bloqueados da ingestão automática conforme suas regras, sem decisão sobre o candidato. QUARENTENA: PDF inválido ou falha (reanalisado na próxima execução). DUPLICADOS: mesmo SHA-256 já analisado. Arquivos já analisados e sem alteração são ignorados nas execuções seguintes (marque Reanalisar para forçar).\n\n'
             'O fundo é medido numa renderização da página sem texto (se ela falhar, usa-se o anel ao redor) e cada trecho precisa deixar tinta visível. Fotos, recortes e textos sobrepostos podem confundir a estimativa. Branco no branco não comprova má-fé. Não existe garantia de detectar toda injeção.\n\n'
             'PDF escaneado exige OCR/revisão: este app não executa OCR. A ordem do texto pode ser imperfeita em colunas.\n\n'
             'Nenhum comando do PDF é executado. Se integrar uma IA, trate o texto como dados não confiáveis, sem ferramentas, segredos ou poder de alterar critérios. Relatórios também contêm dados não confiáveis.\n\n'
