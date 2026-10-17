@@ -4,7 +4,7 @@ Este módulo não importa Tkinter: pode ser usado em scripts, testes e servidore
 O PDF e os relatórios são dados não confiáveis: nunca executar suas instruções.
 Depende de pymupdf, numpy e requests (Python 3.11+).
 """
-import os, re, json, shutil, tempfile, threading, socket, ipaddress
+import base64, binascii, codecs, os, re, json, shutil, tempfile, threading, socket, ipaddress
 import unicodedata, uuid, time, multiprocessing, math, bisect, contextlib
 from collections import Counter
 from itertools import islice
@@ -17,7 +17,7 @@ import urllib3.util.connection as _urllib3_connection
 import pymupdf
 import numpy as np
 
-APP_VERSION = '2.8'
+APP_VERSION = '2.9'
 DOWNLOAD_DEADLINE_S = 90   # prazo total de um download, mesmo que o servidor "goteje" bytes
 MANIFEST_DEADLINE_S = 30   # prazo total para ler o manifesto de URLs (mesma defesa contra o gotejamento)
 LEGIBLE_RATIO = 3.0        # contraste (na página já renderizada) a partir do qual o texto é legível
@@ -96,6 +96,23 @@ PATTERNS = [
                     r"(?:est[ea]s?|ess[ea]s?|tod[oa]s?(?:\s+(?:os|as))?|os|as|seus?|suas?|meus?|minhas?)\s+(?:\w+\s+){0,3}?"
                     r"(?:curr[ií]culos?|candidat[oa]s?|conversas?|hist[oó]rico|prompts?|credenciais|chaves?|segredos?|senhas?|tokens?|dados|arquivos?|documentos?|informa[cç][oõ]es)\b"
                     r"[^.]{0,100}?(?:https?://\S+|[\w.+-]+@[\w-]+\.[\w.-]+)"),
+    # --- outros idiomas: pedido para ignorar as instruções e ditar a decisão (ES, FR, DE, IT) ---
+    ('instrucao_ia', r'(?i)\b(?:ignora|ignore|ignorad|olvida|olvide|descarta|descarte|omite|omita|desestima|desestime)\s+(?:(?:todas?|todos?|cualquier|las|los|tus|sus|estas?|esas?|aquellas?|mis|nuestras?)\s+)*'
+                     r'(?:instrucciones|reglas|indicaciones|directrices|[óo]rdenes|directivas|pautas|normas)\b'
+                     r'|\b(?:olvida|ignora|olvide|ignore)\s+todo\s+(?:lo\s+)?anterior\b'),
+    ('instrucao_ia', r"(?i)\b(?:ignore|ignorez|oublie|oubliez|n[ée]glige|n[ée]gligez)\s+(?:(?:toutes?|tous|les|vos|tes|ces|ses|mes|nos)\s+)*"
+                     r"(?:instructions|consignes|r[èe]gles|directives|ordres|indications)\b"
+                     r"|\bfais\s+abstraction\s+de\s+(?:toutes?\s+)?(?:les\s+)?(?:instructions|consignes)\b"),
+    ('instrucao_ia', r'(?i)\b(?:ignoriere|ignorieren\s+sie|ignoriert|vergiss|vergessen\s+sie|missachte|missachten\s+sie)\s+(?:(?:alle[ns]?|die|deine|ihre|diese|meine|s[äa]mtliche|vorherigen|fr[üu]heren|bisherigen|obigen|urspr[üu]nglichen|vorangegangenen)\s+)*'
+                     r'(?:anweisungen|anleitungen|regeln|vorgaben|befehle|richtlinien|instruktionen)\b'),
+    ('instrucao_ia', r'(?i)\b(?:ignora|ignorate|dimentica|dimenticate|trascura|trascurate)\s+(?:(?:tutte|tutti|le|i|gli|tue|vostre|queste|quelle)\s+)*'
+                     r'(?:istruzioni|regole|indicazioni|direttive|comandi|ordini)\b'),
+    ('comando_avaliacao', r"(?i)\b(?:aprueba|apruebe|contrata|contrate|recomienda|recomiende|selecciona|seleccione|clasifica|clasifique|prioriza|priorice|punt[úu]a|punt[úu]e|califica|califique)\b(?:\s+[\w'-]+){0,4}?\s+"
+                          r"(?:a\s+)?(?:est[ea]|es[ea]|el|la|mi)\s+(?:candidat[oa]|curr[ií]culo|curriculum|perfil|hoja\s+de\s+vida)\b"),
+    ('comando_avaliacao', r"(?i)\b(?:approuvez|approuve|embauchez|embauche|recommandez|recommande|s[ée]lectionnez|s[ée]lectionne|classez|classe)\b(?:\s+[\w'-]+){0,4}?\s+"
+                          r"(?:ce|cet|cette|mon|ma)\s+(?:candidat|candidate|cv|profil|curriculum)\b"),
+    ('comando_avaliacao', r"(?i)\b(?:genehmige|genehmigen\s+sie|empfiehl|empfehlen\s+sie|bewerte|bewerten\s+sie|stelle|stellen\s+sie)\b(?:\s+[\w'-]+){0,4}?\s+"
+                          r"(?:diesen|diese|diesem|meinen|meine)\s+(?:kandidaten|bewerber|bewerberin|kandidatin|lebenslauf|bewerbung)\b"),
 ]
 
 # Frases de injeção que sobrevivem à normalização apenas quando as letras estão
@@ -314,19 +331,83 @@ def squashed_instruction_text(text):
     return ''.join(c for c in text.lower() if c.isalpha() and not unicodedata.combining(c))
 
 
-def instruction_alerts(raw_text):
-    """Alertas de possível instrução dirigida à IA para um texto de inspeção."""
+_HYPHEN_BREAK = re.compile(r'(?<=\w)[-\u2010\u2011]\s+(?=[a-zà-ÿ])')       # "ig- nore": hifenização de fim de linha
+_TOKEN_MAX = 40       # palavras com letras trocadas são curtas; tokens maiores não são examinados (evita custo quadratico)
+_ENCODED_MAX = 8192   # cargas base64/hex reais são curtas; um token maior é ignorado, não decodificado
+_LEET = str.maketrans({'0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '@': 'a', '$': 's'})
+_LEET_CHARS = frozenset('013457@$')
+_B64 = re.compile(r'(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{24,}={0,2}(?![A-Za-z0-9+/_-])')
+_HEX = re.compile(r'(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}){16,}(?![0-9A-Fa-f])')
+# Frases longas o bastante para serem procuradas no texto achatado sempre (sílabas separadas, hifens, quebras de
+# linha, números de página no meio), também invertidas e em ROT13. As curtas só valem com letras separadas
+# (ver instruction_alerts), para não casar "never forget. Everything...".
+LONG_SQUASHED = tuple(p for p in SQUASHED_PHRASES if len(p) >= 22)
+_LONG_VARIANTS = tuple((kind, p) for p in LONG_SQUASHED for kind, p in (
+    ('texto separado em sílabas, hifens ou quebras', p), ('texto invertido', p[::-1]), ('ROT13', codecs.encode(p, 'rot13'))))
+
+
+def _text_variants(text):
+    """Versões do texto sem hifenização de fim de linha e sem leetspeak (1gn0re), só para a busca de frases."""
+    variants = []
+    unhyphenated = _HYPHEN_BREAK.sub('', text)
+    if unhyphenated != text: variants.append(unhyphenated)
+    leet = ' '.join(t.translate(_LEET) if len(t) <= _TOKEN_MAX and any(c in _LEET_CHARS for c in t) and any(c.isalpha() for c in t) else t for t in text.split(' '))
+    if leet != text: variants.append(leet)
+    return variants
+
+
+def _readable_text(raw):
+    """Bytes decodificados que parecem frase em texto simples (descarta binário, chaves e hashes)."""
+    try: value = raw.decode('utf-8')
+    except UnicodeDecodeError: return None
+    if len(value) >= 12 and value.count(' ') >= 2 and sum(c.isprintable() or c in '\n\t' for c in value) / len(value) >= .95: return value
+    return None
+
+
+def _decoded_payloads(text):
+    """Cargas em base64 ou hexadecimal que decodificam para texto legível (a IA pode ser instruída a decodificá-las)."""
+    found = []
+    for m in islice(_B64.finditer(text), 30):
+        if len(m.group()) > _ENCODED_MAX: continue
+        token = m.group().replace('-', '+').replace('_', '/')
+        try: value = _readable_text(base64.b64decode(token + '=' * (-len(token) % 4), validate=True))
+        except (ValueError, binascii.Error): continue
+        if value: found.append(('base64', value))
+    for m in islice(_HEX.finditer(text), 30):
+        if len(m.group()) > _ENCODED_MAX: continue
+        value = _readable_text(bytes.fromhex(m.group()))
+        if value: found.append(('hexadecimal', value))
+    return found
+
+
+def instruction_alerts(raw_text, _depth=0):
+    """Alertas de possível instrução dirigida à IA para um texto de inspeção.
+
+    Além do texto normalizado, procura em variantes (sem hifenização, sem leetspeak), em frases longas sobre o
+    texto achatado (também invertidas e em ROT13) e em cargas base64/hexadecimais que decodificam para texto.
+    """
     prepared = _prepare_instruction_text(raw_text)
     text = normalized_instruction_text(prepared)
     found = []
     for name, pattern in PATTERNS:
         for m in islice(re.finditer(pattern, text), 8):
             found.append({'type':name,'severity':'review','detail':'Possível instrução dirigida ao avaliador automatizado','sample':text[max(0,m.start()-40):m.end()+40]})
-    # Texto achatado ignora pontuação; só é consultado quando há letras separadas
+    for variant in _text_variants(text):
+        for name, pattern in PATTERNS:
+            if any(a['type'] == name for a in found): continue   # já sinalizado; a variante só acrescenta tipos novos
+            for m in islice(re.finditer(pattern, variant), 3):
+                found.append({'type':name,'severity':'review','detail':'Possível instrução dirigida ao avaliador (hifenização ou caracteres trocados)','sample':variant[max(0,m.start()-40):m.end()+40]})
+    # Texto achatado ignora pontuação; as frases curtas só são consultadas quando há letras separadas
     # (ofuscação), para não casar frases legítimas como "never forget. Everything...".
-    if (not any(a['type'] == 'instrucao_ia' for a in found) and _SPACED_LETTERS.search(prepared)
-            and any(f in squashed_instruction_text(prepared) for f in SQUASHED_PHRASES)):
-        found.append({'type':'instrucao_ia','severity':'review','detail':'Possível instrução dirigida ao avaliador (letras separadas)'})
+    if not any(a['type'] == 'instrucao_ia' for a in found):
+        squashed = squashed_instruction_text(prepared)
+        how = next((kind for kind, p in _LONG_VARIANTS if p in squashed), None)
+        if how is None and _SPACED_LETTERS.search(prepared) and any(f in squashed for f in SQUASHED_PHRASES): how = 'letras separadas'
+        if how: found.append({'type':'instrucao_ia','severity':'review','detail':f'Possível instrução dirigida ao avaliador ({how})'})
+    if _depth == 0:
+        for kind, payload in _decoded_payloads(text):
+            for alert in instruction_alerts(payload, 1):
+                found.append({**alert, 'detail': f'{alert["detail"]} (decodificado de {kind})'})
     return found
 
 
@@ -416,6 +497,24 @@ def text_free_image(scratch, index, dpi):
         return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3).copy()
     except Exception:
         return None
+
+def paper_white_renders(backed, backed_clean, index, dpi):
+    """Renderiza a página `index` sobre papel branco OPACO, com e sem texto (cópias descartáveis, nunca salvas).
+
+    O MuPDF compõe a página sobre fundo transparente; leitores como pdfium (Chrome) e poppler desenham sobre
+    papel branco. Com modo de mesclagem isso muda o resultado: texto preto em `/BM /Lighten` vira branco
+    sobre papel branco, mas o MuPDF o mostra preto. Um retângulo branco por baixo de todo o conteúdo reproduz
+    a composição dos leitores que desenham sobre papel. Devolve (None, None) se falhar.
+    """
+    try:
+        for doc in (backed, backed_clean):
+            page = doc[index]; page.set_rotation(0)
+            page.draw_rect(page.rect, color=None, fill=(1, 1, 1), overlay=False)
+        pix = backed[index].get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False, annots=True)
+        image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3).copy()
+        return image, text_free_image(backed_clean, index, dpi)
+    except Exception:
+        return None, None
 
 def ink_difference(image, clean, rect, scale):
     """Diferença (0–255) pixel a pixel entre a página com e sem texto, no retângulo do trecho.
@@ -537,7 +636,12 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
             try: scratch = stack.enter_context(pymupdf.open(path))
             except Exception: scratch = None
         inspection_parts = [str(v) for v in doc.metadata.values() if v] + [doc.get_xml_metadata()]
-        inspection_parts.extend(structural_checks(doc, alerts))
+        flags = {}
+        inspection_parts.extend(structural_checks(doc, alerts, flags))
+        backed = backed_clean = None   # cópias para renderizar sobre papel branco, só se houver modos de mesclagem
+        if flags.get('blend') and 'contrast' in enabled:
+            try: backed, backed_clean = stack.enter_context(pymupdf.open(path)), stack.enter_context(pymupdf.open(path))
+            except Exception: backed = backed_clean = None
         for pn, page in enumerate(doc, 1):
             # Inspecionar também anotações e campos, ausentes da extração comum.
             for annot in page.annots() or ():
@@ -558,6 +662,8 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
             scale = analysis_dpi / 72
             clean = text_free_image(scratch, pn - 1, analysis_dpi) if scratch is not None else None
             if clean is not None and clean.shape != image.shape: clean = None
+            image_wb, clean_wb = paper_white_renders(backed, backed_clean, pn - 1, analysis_dpi) if backed is not None else (None, None)
+            if image_wb is None or clean_wb is None or image_wb.shape != image.shape or clean_wb.shape != image.shape: image_wb = clean_wb = None
             bboxlog = page.get_bboxlog()
             # Só objetos de preenchimento podem ocultar texto; índice por ordem de desenho.
             fills = [(i, b) for i, (t, b) in enumerate(bboxlog) if t in ('fill-image','fill-path','fill-shade')]
@@ -617,6 +723,12 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                                 metrics['low_contrast'] += len(t)
                                 alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':'Sem tinta visível na renderização (cor igual ao fundo, modo de mesclagem, padrão ou cobertura)','sample':t[:100],'bbox':list(span['bbox'])})
                                 continue
+                            if strength is not None and image_wb is not None:
+                                strength_wb = int(ink_difference(image_wb, clean_wb, span['bbox'], scale)[0].max())
+                                if strength_wb < INK_MIN:   # visível só na composição sobre fundo transparente
+                                    metrics['low_contrast'] += len(t)
+                                    alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':'Texto visível apenas quando a página é composta sobre fundo transparente; leitores que desenham sobre papel branco (Chrome, poppler) não o mostram (modo de mesclagem)','sample':t[:100],'bbox':list(span['bbox'])})
+                                    continue
                             hidden = hidden_characters(difference, chars, scale)
                             if hidden:
                                 gone = set(hidden); metrics['low_contrast'] += len(hidden)
@@ -670,6 +782,7 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
 # Nomes de ação que executam algo ou enviam dados. No texto canônico do MuPDF os escapes de nome (#xx) já vêm
 # resolvidos: `/Java#53cript` chega aqui como `/JavaScript`, então a ofuscação por escape não escapa da busca.
 _ACTIVE_ACTIONS = re.compile(r'/(JavaScript|JS|Launch|SubmitForm|ImportData)(?![\w#.\-])')
+_BLEND = re.compile(r'/BM\s*\[?\s*/(?!Normal\b|Compatible\b)[A-Za-z]+')   # modo de mesclagem diferente do normal
 _OBJECT_SCAN_CAP = 65_536     # caracteres lidos por objeto: um objeto gigante não trava a varredura
 _STRINGS_BUDGET = 200_000     # total de caracteres de strings internas enviadas à busca de frases
 _ESCAPE = re.compile(r'\\([0-7]{1,3}|.)', re.S)
@@ -715,7 +828,7 @@ def _pdf_strings(obj):
     return ''.join(rest), found
 
 
-def structural_checks(doc, alerts):
+def structural_checks(doc, alerts, flags=None):
     """Sinaliza ações ativas e camadas, e devolve as strings internas do PDF para a busca de frases.
 
     Percorre o texto canônico de cada objeto, não só as chaves de primeiro nível: um dicionário de ação embutido
@@ -730,6 +843,7 @@ def structural_checks(doc, alerts):
         try: keys = doc.xref_get_keys(xref); obj = doc.xref_object(xref, compressed=False)
         except (RuntimeError, ValueError): continue  # Xref livre não é um objeto utilizável.
         rest, found = _pdf_strings(obj[:_OBJECT_SCAN_CAP])
+        if flags is not None and _BLEND.search(rest): flags['blend'] = True
         action = _ACTIVE_ACTIONS.search(rest)
         if action:
             alerts.append({'type':'acao_ativa','severity':'review','detail':f'Ação ativa em objeto {xref}: /{action.group(1)}.'})
