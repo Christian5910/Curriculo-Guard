@@ -1,4 +1,30 @@
+# Versão 2.10
+
+Quarta bateria, desta vez com leitores independentes (pdfium, poppler, pypdf, pdfminer e pdftotext) como oráculo em vez de raciocínio sobre a especificação.
+
+**Correção de um erro da v2.9.** A v2.9 afirmou (no CHANGELOG, no README, na mensagem do alerta e nos testes) que texto preto com modo de mesclagem `Lighten`, `Screen` e outros some no Chrome e no poppler, e passou a retirar esse texto do TXT. Medido com pdfium e poppler, **os três renderizadores mostram o texto** (pixel 0 nos três). A afirmação veio de raciocínio, sem medir. O recurso (`paper_white_renders` e o detector de mesclagem) foi removido e o texto visível volta ao TXT sem alerta; um teste de regressão garante isso. Não consegui testar Acrobat, Preview ou Edge.
+
+Defeitos confirmados:
+
+- **`Separation /None` vazava para o TXT (segurança):** o MuPDF desenha preto o texto pintado com um colorante `None` (que não deixa marca); pdfium e poppler não desenham nada, e os quatro extratores leem o texto. O motor não alertava. Agora `cor_sem_marca` sinaliza o espaço de cor (sem dependências) e, com o pdfium instalado, `renderizadores_divergem` tira do TXT o texto que só o MuPDF desenha.
+- **Texto recortado passava sem alerta:** com máscara de recorte vazia ou `Form XObject` de `BBox` vazio, o MuPDF descarta o texto, mas pypdf, pdfminer e pdftotext o leem no PDF original, que fica na pasta de aprovados. Agora `texto_recortado` compara o texto desenhado (`texttrace`) com o extraído. Primeiro tropeço evitado: `Tr 2` (preenchimento e contorno, o negrito sintético) registra cada letra duas vezes no `texttrace`, o que geraria alerta falso; as letras são contadas uma vez por posição.
+
+Funcionalidade nova:
+
+- **Segunda opinião de renderizador (opcional):** com `pypdfium2` instalado, a página é renderizada também pelo pdfium e o texto que só o MuPDF desenha é tirado do TXT. Não compara posições nem fontes, só se há alguma marca; fundo com imagem ou degradê não é julgado. `cross_render` em `analysis_options`: `auto` (padrão: só em PDFs com cor `Separation`/`DeviceN`, padrões, sombreados, máscaras suaves, mesclagem ou fontes Type 3), `always` ou `off`. Custo medido: 19 ms por página em `auto` num PDF comum (sem custo), 78 ms em `always`.
+- **`evaluation/run_renderers.py`:** o laboratório vira oráculo permanente, com `--check` na CI. Regras: o que o MuPDF mostra e outro renderizador esconde precisa ter alerta ou ficar fora do TXT; o que outro extrator lê e o MuPDF não lê precisa ter alerta. Com as defesas removidas ele acusa `Separation /None` e sai com código 1.
+
+Verificado e **sem problema**: páginas legítimas aleatórias (fontes variadas, texto rotacionado, `CropBox` deslocado, página rotacionada, degradês) sem nenhum alerta novo, 270 no modo `always` e 120 no `auto`; fuzz de 250 PDFs corrompidos com o pdfium forçado em todas as análises (todos classificados, nenhum lento); bomba de imagem com o pdfium (958 MB contra 949 MB, dentro do teto de 2 GB); as avaliações de PDFs (27 de 27, 12 de 12, 13 de 13) idênticas às da v2.9.
+
+Tropeços, para registro: a afirmação errada acima; o meu primeiro teste de falsos positivos usava um gerador que punha texto fora da página (129 de 150 páginas) e não provava nada, e foi refeito; e um mutante escapou porque o teste fazia o `PdfDocument` levantar uma exceção que o motor captura de propósito (o teste agora conta as aberturas).
+
+Limites conhecidos: sem o pdfium, um PDF com `Separation /None` vai para a revisão (há alerta), mas o texto não é tirado do TXT; o modo `auto` só cobre as construções listadas, e divergências fora delas não são vistas; o pdfium é código nativo lendo PDFs hostis (dentro do mesmo processo isolado, com teto de memória e prazo); poppler, pypdf, pdfminer e pdftotext só são usados pelo script oráculo, não pelo motor; o PDF original não é alterado, então um extrator externo ainda lê o texto recortado se alguém o usar no lugar do TXT.
+
+Testes: 181 → 188 (8 de interface real). Verificado em Python 3.11, 3.12 e 3.13, com o pdfium instalado nos três.
+
 # Versão 2.9
+
+> **Atenção:** o primeiro defeito listado abaixo (texto com mesclagem `Lighten` sumindo em outros leitores) e o recurso que o corrigia **estavam errados e foram removidos na 2.10**. Medido com pdfium e poppler, os três renderizadores mostram o texto. O restante desta versão (evasões do detector, relatórios grandes, CSV para Excel) segue válido.
 
 Terceira bateria: o que passa pelo detector, onde os renderizadores divergem, relatórios hostis e exportação. Como nas versões anteriores, cada defeito foi reproduzido antes de corrigir e tem teste de regressão verificado por mutação (remover o mecanismo faz o teste falhar).
 
