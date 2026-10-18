@@ -16,8 +16,10 @@ import requests
 import urllib3.util.connection as _urllib3_connection
 import pymupdf
 import numpy as np
+try: import pypdfium2 as _pdfium   # opcional: segunda opinião de renderizador (ver reference_render)
+except Exception: _pdfium = None
 
-APP_VERSION = '2.9'
+APP_VERSION = '2.10'
 DOWNLOAD_DEADLINE_S = 90   # prazo total de um download, mesmo que o servidor "goteje" bytes
 MANIFEST_DEADLINE_S = 30   # prazo total para ler o manifesto de URLs (mesma defesa contra o gotejamento)
 LEGIBLE_RATIO = 3.0        # contraste (na página já renderizada) a partir do qual o texto é legível
@@ -498,23 +500,46 @@ def text_free_image(scratch, index, dpi):
     except Exception:
         return None
 
-def paper_white_renders(backed, backed_clean, index, dpi):
-    """Renderiza a página `index` sobre papel branco OPACO, com e sem texto (cópias descartáveis, nunca salvas).
+def _letters(text):
+    return Counter(c for c in unicodedata.normalize('NFKC', text).casefold() if c.isalnum())
 
-    O MuPDF compõe a página sobre fundo transparente; leitores como pdfium (Chrome) e poppler desenham sobre
-    papel branco. Com modo de mesclagem isso muda o resultado: texto preto em `/BM /Lighten` vira branco
-    sobre papel branco, mas o MuPDF o mostra preto. Um retângulo branco por baixo de todo o conteúdo reproduz
-    a composição dos leitores que desenham sobre papel. Devolve (None, None) se falhar.
+
+def dropped_letters(drawn, extracted):
+    """Letras e dígitos que foram desenhados (texttrace) e não aparecem na extração de texto.
+
+    Texto cortado por uma máscara de recorte vazia, por um Form XObject de BBox vazio, fora da área visível ou com
+    largura zero é descartado pela extração do MuPDF, mas pypdf, pdfminer e pdftotext o leem no PDF original.
     """
+    return sum((_letters(drawn) - _letters(extracted)).values())
+
+
+def reference_render(pdf, index, dpi, shape):
+    """Segunda opinião: a página renderizada pelo pdfium (o motor do Chrome), em cinza e no tamanho do MuPDF.
+
+    Devolve None se o pdfium não estiver instalado, falhar ou produzir um tamanho que não dê para comparar.
+    """
+    if pdf is None: return None
     try:
-        for doc in (backed, backed_clean):
-            page = doc[index]; page.set_rotation(0)
-            page.draw_rect(page.rect, color=None, fill=(1, 1, 1), overlay=False)
-        pix = backed[index].get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False, annots=True)
-        image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3).copy()
-        return image, text_free_image(backed_clean, index, dpi)
+        page = pdf[index]; page.set_rotation(0)
+        gray = page.render(scale=dpi / 72).to_numpy()[:, :, :3].mean(axis=2)
     except Exception:
-        return None, None
+        return None
+    if abs(gray.shape[0] - shape[0]) > 2 or abs(gray.shape[1] - shape[1]) > 2: return None
+    canvas = np.full(shape[:2], 255.0); h, w = min(shape[0], gray.shape[0]), min(shape[1], gray.shape[1]); canvas[:h, :w] = gray[:h, :w]
+    return canvas
+
+
+def mupdf_only_ink(image_gray, reference_gray, rect, scale):
+    """True se o MuPDF mostra tinta forte na região do trecho e o pdfium mostra a região praticamente lisa.
+
+    Não compara posições nem fontes (renderizadores substituem fontes de formas diferentes): só pergunta se há
+    alguma marca. Fundo com imagem ou degradê tem variação própria e não é julgado (nunca gera alarme falso aí).
+    """
+    h, w = image_gray.shape
+    x0, y0 = max(0, int(rect[0] * scale)), max(0, int(rect[1] * scale)); x1, y1 = min(w, int(rect[2] * scale) + 1), min(h, int(rect[3] * scale) + 1)
+    if x1 <= x0 or y1 <= y0: return False
+    return float(np.ptp(image_gray[y0:y1, x0:x1])) >= 100 and float(np.ptp(reference_gray[y0:y1, x0:x1])) <= 25
+
 
 def ink_difference(image, clean, rect, scale):
     """Diferença (0–255) pixel a pixel entre a página com e sem texto, no retângulo do trecho.
@@ -615,11 +640,13 @@ def covered_fraction(box, others, cell=.5):
 
 def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                 contrast_limit=2.0, opacity_limit=.95, overlap_limit=.75,
-                enabled=None, max_pages=35):
+                enabled=None, max_pages=35, cross_render='auto'):
     """Extrai texto elegível e evidências; contraste/oclusão são estimativas.
 
     PDF mede fontes em pontos. DPI referência define o limite de leitura;
     DPI análise define somente a resolução da imagem usada para contraste.
+    `cross_render` controla a segunda opinião do pdfium (se instalado): 'auto' só em PDFs com construções em que os
+    renderizadores divergem, 'always' em todos, 'off' nunca.
     O contraste é medido contra o fundo real (página renderizada sem texto);
     se isso falhar, recai na estimativa pelo anel ao redor do trecho.
     """
@@ -638,10 +665,11 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
         inspection_parts = [str(v) for v in doc.metadata.values() if v] + [doc.get_xml_metadata()]
         flags = {}
         inspection_parts.extend(structural_checks(doc, alerts, flags))
-        backed = backed_clean = None   # cópias para renderizar sobre papel branco, só se houver modos de mesclagem
-        if flags.get('blend') and 'contrast' in enabled:
-            try: backed, backed_clean = stack.enter_context(pymupdf.open(path)), stack.enter_context(pymupdf.open(path))
-            except Exception: backed = backed_clean = None
+        reference = None   # segunda opinião de renderizador (pdfium), se instalada e se o PDF a justificar
+        if _pdfium is not None and 'contrast' in enabled and (cross_render == 'always' or (cross_render == 'auto' and flags.get('exotic'))):
+            try: reference = _pdfium.PdfDocument(str(path)); stack.callback(reference.close)
+            except Exception: reference = None
+        metrics['renderers'] = 'mupdf+pdfium' if reference is not None else 'mupdf'
         for pn, page in enumerate(doc, 1):
             # Inspecionar também anotações e campos, ausentes da extração comum.
             for annot in page.annots() or ():
@@ -650,7 +678,8 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
             for widget in page.widgets() or ():
                 inspection_parts.append(str(widget.field_value or ''))
                 alerts.append({'type':'formularios','severity':'review','page':pn,'detail':'Página contém campo interativo; não incluído no TXT.'})
-            inspection_parts.append(page.get_text())
+            page_text = page.get_text()
+            inspection_parts.append(page_text)
             if sum(len(part) for part in inspection_parts) > 1_000_000:
                 raise ValueError('Conteúdo textual excede 1 milhão de caracteres.')
             # Coordenadas da extração são desrotacionadas: renderizar igual.
@@ -662,18 +691,23 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
             scale = analysis_dpi / 72
             clean = text_free_image(scratch, pn - 1, analysis_dpi) if scratch is not None else None
             if clean is not None and clean.shape != image.shape: clean = None
-            image_wb, clean_wb = paper_white_renders(backed, backed_clean, pn - 1, analysis_dpi) if backed is not None else (None, None)
-            if image_wb is None or clean_wb is None or image_wb.shape != image.shape or clean_wb.shape != image.shape: image_wb = clean_wb = None
+            reference_gray = reference_render(reference, pn - 1, analysis_dpi, image.shape)
+            image_gray = image.mean(axis=2, dtype=np.float32) if reference_gray is not None else None
             bboxlog = page.get_bboxlog()
             # Só objetos de preenchimento podem ocultar texto; índice por ordem de desenho.
             fills = [(i, b) for i, (t, b) in enumerate(bboxlog) if t in ('fill-image','fill-path','fill-shade')]
             fill_order = [i for i, _ in fills]
             # Interseção de retângulos sugere oclusão; não comprova invisibilidade.
             traces = page.get_texttrace()  # Falha deve ir para quarentena.
-            blocked_boxes = []
+            blocked_boxes = []; drawn = []; seen_glyphs = set()
             for tr in traces:
                 # Texttrace também expõe caracteres não retornados pela extração comum.
                 inspection_parts.append(''.join(chr(c[0]) for c in tr.get('chars',()) if 0 <= c[0] <= 0x10ffff))
+                # Para comparar com a extração, cada letra conta uma vez por posição: preenchimento + contorno (Tr 2)
+                # registra a mesma letra duas vezes no texttrace e a extração a conta uma só.
+                for c in tr.get('chars',()):
+                    key = (c[0], round(c[2][0] / 3), round(c[2][1] / 3))
+                    if 0 <= c[0] <= 0x10ffff and key not in seen_glyphs: seen_glyphs.add(key); drawn.append(chr(c[0]))
                 if tr.get('bbox') and overlap(tr['bbox'],tuple(page.rect)) < .98:
                     blocked_boxes.append(tr['bbox'])
                     alerts.append({'type':'fora_da_pagina','severity':'review','page':pn,'bbox':list(tr['bbox']),'detail':'Texto total ou parcialmente fora da área visível.'})
@@ -691,6 +725,9 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                         alerts.append({'type':'possivel_sobreposicao','severity':'review','page':pn,'detail':'Objetos posteriores sobre região textual','bbox':list(box)})
             if sum(len(part) for part in inspection_parts) > 1_000_000:
                 raise ValueError('Conteúdo textual excede 1 milhão de caracteres.')
+            drawn_text = ''.join(drawn); missing = dropped_letters(drawn_text, page_text)
+            if missing >= _DROPPED_MIN and missing >= .02 * sum(_letters(drawn_text).values()):
+                alerts.append({'type':'texto_recortado','severity':'review','page':pn,'detail':f'{missing} caractere(s) desenhado(s) que a extração descarta (recortados por máscara de corte ou fora da área visível); pypdf, pdfminer e pdftotext os leem no PDF original'})
             raw = page.get_text('rawdict', sort=True)
             page_lines = []
             for block in raw['blocks']:
@@ -723,12 +760,10 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
                                 metrics['low_contrast'] += len(t)
                                 alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':'Sem tinta visível na renderização (cor igual ao fundo, modo de mesclagem, padrão ou cobertura)','sample':t[:100],'bbox':list(span['bbox'])})
                                 continue
-                            if strength is not None and image_wb is not None:
-                                strength_wb = int(ink_difference(image_wb, clean_wb, span['bbox'], scale)[0].max())
-                                if strength_wb < INK_MIN:   # visível só na composição sobre fundo transparente
-                                    metrics['low_contrast'] += len(t)
-                                    alerts.append({'type':'baixo_contraste','severity':'review','page':pn,'detail':'Texto visível apenas quando a página é composta sobre fundo transparente; leitores que desenham sobre papel branco (Chrome, poppler) não o mostram (modo de mesclagem)','sample':t[:100],'bbox':list(span['bbox'])})
-                                    continue
+                            if image_gray is not None and mupdf_only_ink(image_gray, reference_gray, span['bbox'], scale):
+                                metrics['low_contrast'] += len(t)
+                                alerts.append({'type':'renderizadores_divergem','severity':'review','page':pn,'detail':'O MuPDF desenha este texto e o pdfium (motor do Chrome) não: ele pode estar invisível para quem abrir o PDF em outro leitor','sample':t[:100],'bbox':list(span['bbox'])})
+                                continue
                             hidden = hidden_characters(difference, chars, scale)
                             if hidden:
                                 gone = set(hidden); metrics['low_contrast'] += len(hidden)
@@ -782,7 +817,11 @@ def analyze_pdf(path, reference_dpi=96, analysis_dpi=150, min_px=8,
 # Nomes de ação que executam algo ou enviam dados. No texto canônico do MuPDF os escapes de nome (#xx) já vêm
 # resolvidos: `/Java#53cript` chega aqui como `/JavaScript`, então a ofuscação por escape não escapa da busca.
 _ACTIVE_ACTIONS = re.compile(r'/(JavaScript|JS|Launch|SubmitForm|ImportData)(?![\w#.\-])')
-_BLEND = re.compile(r'/BM\s*\[?\s*/(?!Normal\b|Compatible\b)[A-Za-z]+')   # modo de mesclagem diferente do normal
+_NO_MARK = re.compile(r'/Separation\s*/None\b|/DeviceN\s*\[\s*(?:/None\s*)+\]')   # colorante None: não deixa marca
+# Construções em que MuPDF, pdfium e poppler já divergiram ou costumam divergir (cor sem marca, padrões, sombreados,
+# máscaras suaves, mesclagem, fontes Type 3). Só nelas a segunda opinião do pdfium roda no modo "auto".
+_EXOTIC = re.compile(r'/Separation\b|/DeviceN\b|/PatternType\b|/ShadingType\b|/SMask\b|/Type3\b|/BM\s*\[?\s*/(?!Normal\b|Compatible\b)')
+_DROPPED_MIN = 12   # letras desenhadas e descartadas pela extração a partir das quais a página é sinalizada
 _OBJECT_SCAN_CAP = 65_536     # caracteres lidos por objeto: um objeto gigante não trava a varredura
 _STRINGS_BUDGET = 200_000     # total de caracteres de strings internas enviadas à busca de frases
 _ESCAPE = re.compile(r'\\([0-7]{1,3}|.)', re.S)
@@ -843,7 +882,9 @@ def structural_checks(doc, alerts, flags=None):
         try: keys = doc.xref_get_keys(xref); obj = doc.xref_object(xref, compressed=False)
         except (RuntimeError, ValueError): continue  # Xref livre não é um objeto utilizável.
         rest, found = _pdf_strings(obj[:_OBJECT_SCAN_CAP])
-        if flags is not None and _BLEND.search(rest): flags['blend'] = True
+        if flags is not None and _EXOTIC.search(rest): flags['exotic'] = True
+        if _NO_MARK.search(rest):
+            alerts.append({'type':'cor_sem_marca','severity':'review','detail':f'Espaço de cor com colorante None no objeto {xref}: o texto pintado com ele não deixa marca em pdfium e poppler, mas o MuPDF o desenha.'})
         action = _ACTIVE_ACTIONS.search(rest)
         if action:
             alerts.append({'type':'acao_ativa','severity':'review','detail':f'Ação ativa em objeto {xref}: /{action.group(1)}.'})
@@ -1038,6 +1079,7 @@ def validate_params(params):
                 raise ValueError(f'{label} fora do intervalo permitido ({low}–{high}).')
     check(params, SETTING_LIMITS)
     check(params.get('analysis_options') or {}, OPTION_LIMITS)
+    if (params.get('analysis_options') or {}).get('cross_render', 'auto') not in ('auto', 'always', 'off'): raise ValueError("cross_render deve ser 'auto', 'always' ou 'off'.")
     for name in params.get('extra', ()):
         if not valid_folder_name(name, FOLDERS): raise ValueError('Pasta extra inválida: ' + str(name))
 
