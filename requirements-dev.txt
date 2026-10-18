@@ -2,3 +2,4 @@
 -r requirements.txt
 reportlab>=4.0      # gera currículos de teste com um produtor de PDF independente
 pyflakes>=3.0       # detecta imports sem uso e nomes indefinidos
+pypdfium2>=5,<6     # opcional em produção: segunda opinião de renderizador (pdfium, o motor do Chrome); os testes a exercitam

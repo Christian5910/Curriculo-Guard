@@ -72,7 +72,7 @@ jobs:
         if: runner.os == 'Windows'
         run: python -m unittest discover -v
 
-      # Estes três scripts reproduzem os números citados no README. Com --check, saem
+      # Estes scripts reproduzem os números citados no README. Com --check, saem
       # com erro se a qualidade cair abaixo do que foi medido (regressão).
       - name: Avaliação de frases (recall e falsos positivos)
         run: python -m evaluation.run_phrases --check
@@ -82,3 +82,8 @@ jobs:
 
       - name: Avaliação com PDFs de outro produtor (reportlab)
         run: python -m evaluation.run_realistic --check
+
+      # Oráculo de renderizadores e extratores independentes: usa pdfium (pypdfium2) e, se existirem no
+      # runner, poppler e pdftotext. Ferramentas ausentes são ignoradas.
+      - name: Avaliação com renderizadores e extratores independentes
+        run: python -m evaluation.run_renderers --check

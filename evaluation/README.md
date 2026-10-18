@@ -9,6 +9,7 @@ comando sair com erro se a qualidade cair (a integração contínua usa isso).
 | `python -m evaluation.run_phrases` | Recall e falsos positivos da detecção de frases, no motor atual e na linha de base v2.0. |
 | `python -m evaluation.run_pdfs` | Ataques escondidos, injeção visível, metadados, JavaScript e 11 layouts legítimos, com PDFs gerados na hora. |
 | `python -m evaluation.run_realistic` | Currículos gerados por outros produtores: reportlab sempre; LibreOffice e wkhtmltopdf se estiverem no PATH. |
+| `python -m evaluation.run_renderers` | Oráculo: cada técnica de ocultar texto é medida em renderizadores (MuPDF, pdfium, poppler) e extratores (MuPDF, pypdf, pdfminer, pdftotext) independentes e comparada com a decisão do motor; `--check` falha se um texto que algum leitor esconde ou que só outro extrator lê passar sem alerta. Ferramentas ausentes são ignoradas. |
 
 ## Como ler os números de frases
 
