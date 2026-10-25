@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pymupdf
-from engine import analyze_pdf
+from curriculo_guard.engine import analyze_pdf
 
 JOBS = [('Analista de Dados Sênior', 'Itaú Unibanco', '2021 – atual',
          ['Construí dashboards em Power BI e Python para a diretoria, reduzindo o tempo de fechamento em 30%.',

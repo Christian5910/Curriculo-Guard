@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import pymupdf
-from engine import analyze_pdf, Pipeline, download_pdf, normalized_instruction_text, analyze_isolated, APP_VERSION
-from workflow import ReviewStore, sha256_file
-from review_ui import render_preview
+from curriculo_guard.engine import analyze_pdf, Pipeline, download_pdf, normalized_instruction_text, analyze_isolated, APP_VERSION
+from curriculo_guard.workflow import ReviewStore, sha256_file
+from curriculo_guard.review_ui import render_preview
 
 
 class RevisionTests(unittest.TestCase):
@@ -120,21 +120,21 @@ class DownloadTests(unittest.TestCase):
     def test_failure_preserves_original_and_removes_partial(self):
         with tempfile.TemporaryDirectory() as folder:
             target=Path(folder)/'file.pdf';target.write_bytes(b'old')
-            with patch('engine.is_public_https'),patch('engine.requests.Session') as session:
+            with patch('curriculo_guard.engine.is_public_https'),patch('curriculo_guard.engine.requests.Session') as session:
                 session.return_value.__enter__.return_value.get.return_value=FakeResponse([b'not pdf'])
                 with self.assertRaises(ValueError):download_pdf('https://example.org/file.pdf',target)
             self.assertEqual(target.read_bytes(),b'old');self.assertFalse(list(Path(folder).glob('*.part')))
     def test_cancel_cleanup(self):
         with tempfile.TemporaryDirectory() as folder:
             target=Path(folder)/'file.pdf';cancel=threading.Event();cancel.set()
-            with patch('engine.is_public_https'),patch('engine.requests.Session') as session:
+            with patch('curriculo_guard.engine.is_public_https'),patch('curriculo_guard.engine.requests.Session') as session:
                 session.return_value.__enter__.return_value.get.return_value=FakeResponse([b'%PDF-test'])
                 with self.assertRaises(ValueError):download_pdf('https://example.org/file.pdf',target,cancel)
             self.assertFalse(target.exists());self.assertFalse(list(Path(folder).glob('*.part')))
     def test_successful_download_atomic(self):
         with tempfile.TemporaryDirectory() as folder:
             target=Path(folder)/'file.pdf'
-            with patch('engine.is_public_https'),patch('engine.requests.Session') as session:
+            with patch('curriculo_guard.engine.is_public_https'),patch('curriculo_guard.engine.requests.Session') as session:
                 session.return_value.__enter__.return_value.get.return_value=FakeResponse([b'%PDF-test'])
                 download_pdf('https://example.org/file.pdf',target)
             self.assertEqual(target.read_bytes(),b'%PDF-test')
@@ -157,7 +157,7 @@ class ExtraRegressionTests(unittest.TestCase):
         self.assertIn('instrucao_ia',[a['type'] for a in result['alerts']])
     def test_background_heterogeneity(self):
         import numpy as np
-        from engine import local_background
+        from curriculo_guard.engine import local_background
         image=np.zeros((100,100,3),dtype=np.uint8);image[:,50:]=255
         self.assertIsNone(local_background(image,(20,30,80,60),1))
     def test_pdf_changed_between_analysis_and_copy(self):
@@ -172,20 +172,20 @@ class ExtraRegressionTests(unittest.TestCase):
 
     def test_quarantined_file_is_retried_not_marked_duplicate(self):
         path=self.pdf()
-        with patch('engine.analyze_isolated',side_effect=TimeoutError('simulado')):
+        with patch('curriculo_guard.engine.analyze_isolated',side_effect=TimeoutError('simulado')):
             pipe=Pipeline(self.root/'output');self.assertEqual(pipe.process(path)[0],'quarentena')
         self.assertEqual(pipe.process(path)[0],'aprovados')          # mesma execução
         self.assertEqual(Pipeline(self.root/'output',reprocess=False).process(path)[0],'duplicados')  # agora sim
     def test_quarantine_does_not_block_new_run(self):
         path=self.pdf()
-        with patch('engine.analyze_isolated',side_effect=TimeoutError('simulado')):
+        with patch('curriculo_guard.engine.analyze_isolated',side_effect=TimeoutError('simulado')):
             self.assertEqual(Pipeline(self.root/'output').process(path)[0],'quarentena')
         self.assertEqual(Pipeline(self.root/'output').process(path)[0],'aprovados')   # nova execução do app
     def test_report_records_app_version(self):
         _,_,_,report=self.output(self.pdf())
         self.assertEqual(json.loads(report.read_text())['app_version'],APP_VERSION)
     def test_manifest_ignores_environment_proxies(self):
-        from engine import manifest_urls
+        from curriculo_guard.engine import manifest_urls
         import io
         class Raw:
             def __init__(self): self.buffer=io.BytesIO(b'["https://a.example/x.pdf"]')
@@ -201,11 +201,11 @@ class ExtraRegressionTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self,*a): return False
             def get(self,*a,**k): Session.last=self; return Response()
-        with patch('engine.requests.Session',Session),patch('engine.is_public_https'):
+        with patch('curriculo_guard.engine.requests.Session',Session),patch('curriculo_guard.engine.is_public_https'):
             self.assertEqual(manifest_urls('https://h.example/m.json'),['https://a.example/x.pdf'])
         self.assertFalse(Session.last.trust_env)
     def test_malformed_reports_are_counted_not_raised(self):
-        from workflow import ReviewStore
+        from curriculo_guard.workflow import ReviewStore
         reports=self.root/'out'/'relatorios';reports.mkdir(parents=True)
         bad={'deep.json':'['*200000,'alerts.json':json.dumps({'alerts':'x'}),'items.json':json.dumps({'alerts':[1,2]}),
              'hist.json':json.dumps({'history':[{'a':1}]}),'text.json':json.dumps({'text':5})}
@@ -220,14 +220,14 @@ class ExtraRegressionTests(unittest.TestCase):
             if hidden: page.insert_text((50,120),hidden,fontsize=12,color=(1,1,1))
             doc.save(path)
     def test_validate_params_accepts_defaults_and_rejects_bad_values(self):
-        from engine import validate_params
+        from curriculo_guard.engine import validate_params
         validate_params({'root':str(self.root),'reference_dpi':96,'analysis_dpi':150,'min_px':8,'timeout':45,
                          'extra':['minha pasta'],'analysis_options':{'contrast_limit':2.0,'opacity_limit':.95,'overlap_limit':.75,'max_pages':35}})
         for bad in ({'root':''},{'root':'x','analysis_options':{'contrast_limit':.5}},{'root':'x','timeout':1},{'root':'x','reference_dpi':True},
                     {'root':'x','analysis_dpi':'150'},{'root':'x','extra':['a/b']},{'root':'x','analysis_options':{'max_pages':0}}):
             with self.assertRaises(ValueError,msg=str(bad)): validate_params(bad)
     def test_run_batch_processes_folder_without_gui(self):
-        from engine import run_batch
+        from curriculo_guard.engine import run_batch
         inbox=self.root/'in'; inbox.mkdir(); self.make_pdf(inbox/'limpo.pdf'); self.make_pdf(inbox/'oculto.pdf',hidden='PAYLOAD OCULTO')
         events=[]
         result=run_batch({'root':str(self.root/'saida')},local=str(inbox),report=lambda kind,value:events.append((kind,value)))
@@ -236,7 +236,7 @@ class ExtraRegressionTests(unittest.TestCase):
         self.assertTrue(any(kind=='log' and 'oculto.pdf → verificacao_humana' in value for kind,value in events))
     def test_run_batch_honors_cancel_and_rejects_bad_folder(self):
         import threading
-        from engine import run_batch
+        from curriculo_guard.engine import run_batch
         inbox=self.root/'in2'; inbox.mkdir(); self.make_pdf(inbox/'a.pdf'); cancel=threading.Event(); cancel.set()
         events=[]
         result=run_batch({'root':str(self.root/'saida2')},local=str(inbox),cancel=cancel,report=lambda k,v:events.append((k,v)))
@@ -259,8 +259,8 @@ class ExtraRegressionTests(unittest.TestCase):
             def __exit__(self,*a): return False
             def get(self,*a,**k): return Response()
         dest=self.root/'d.pdf'
-        with patch('engine.requests.Session',Session),patch('engine.is_public_https'):
-            with patch('engine.DOWNLOAD_DEADLINE_S',.6):
+        with patch('curriculo_guard.engine.requests.Session',Session),patch('curriculo_guard.engine.is_public_https'):
+            with patch('curriculo_guard.engine.DOWNLOAD_DEADLINE_S',.6):
                 start=time.monotonic()
                 with self.assertRaises(TimeoutError): download_pdf('https://h.example/a.pdf',dest)
                 self.assertLess(time.monotonic()-start,3)
@@ -286,7 +286,7 @@ class ExtraRegressionTests(unittest.TestCase):
             def __exit__(self,*a): return False
             def get(self,*a,**k): return Response()
         dest=self.root/'bom.pdf'
-        with patch('engine.requests.Session',Session),patch('engine.is_public_https'): download_pdf('https://h.example/a.pdf',dest)
+        with patch('curriculo_guard.engine.requests.Session',Session),patch('curriculo_guard.engine.is_public_https'): download_pdf('https://h.example/a.pdf',dest)
         self.assertEqual(dest.read_bytes(),payload)
     def test_csv_neutralizes_leading_tab_and_carriage_return(self):
         import csv

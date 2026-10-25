@@ -6,7 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from workflow import ReviewStore, MAX_REPORT_BYTES
+from curriculo_guard.workflow import ReviewStore, MAX_REPORT_BYTES
 
 
 def write_report(folder, name, **extra):

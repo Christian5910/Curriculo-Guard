@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pymupdf
-from engine import analyze_pdf
+from curriculo_guard.engine import analyze_pdf
 
 try: import pypdfium2
 except Exception: pypdfium2 = None

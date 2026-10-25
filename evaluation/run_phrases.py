@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from engine import instruction_alerts
+from curriculo_guard.engine import instruction_alerts
 from evaluation import baseline_v2_0 as baseline
 from evaluation import corpus
 

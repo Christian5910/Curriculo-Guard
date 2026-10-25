@@ -159,7 +159,7 @@ class InterfaceTests(unittest.TestCase):
 
     def test_stale_decision_rerun_and_busy_output_through_the_real_interface(self):
         """A tela envia o status que o revisor viu, o lote repetido não empilha duplicados e a saída ocupada é explicada."""
-        from workflow import ReviewStore, FileLock
+        from curriculo_guard.workflow import ReviewStore, FileLock
         ui, root = self.ui, self.root
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp); inbox = tmp / 'curriculos'; inbox.mkdir(); saida = tmp / 'saida'

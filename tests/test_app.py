@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 import pymupdf
 import json, os, shutil
-from engine import analyze_pdf, Pipeline, instruction_alerts, normalized_instruction_text
+from curriculo_guard.engine import analyze_pdf, Pipeline, instruction_alerts, normalized_instruction_text
 from evaluation import corpus
 
 class AnalysisTests(unittest.TestCase):
@@ -51,6 +51,28 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(Pipeline(self.root/'output').process(path)[0],'quarentena')
 
 
+class WindowsAppIdTests(unittest.TestCase):
+    """Identidade do programa na barra de tarefas do Windows: cosmética, nunca pode impedir o programa de abrir."""
+    def test_does_nothing_outside_windows(self):
+        import sys, types
+        from unittest.mock import patch
+        import app as app_module
+        fake = types.SimpleNamespace(windll=types.SimpleNamespace(shell32=types.SimpleNamespace(SetCurrentProcessExplicitAppUserModelID=lambda *_: (_ for _ in ()).throw(AssertionError('não deveria chamar')))))
+        with patch.object(sys, 'platform', 'linux'), patch.dict(sys.modules, {'ctypes': fake}):
+            app_module.set_windows_app_id()
+
+    def test_sets_the_app_id_on_windows_and_swallows_failures(self):
+        import sys, types
+        from unittest.mock import patch
+        import app as app_module
+        calls = []
+        ok = types.SimpleNamespace(windll=types.SimpleNamespace(shell32=types.SimpleNamespace(SetCurrentProcessExplicitAppUserModelID=calls.append)))
+        with patch.object(sys, 'platform', 'win32'), patch.dict(sys.modules, {'ctypes': ok}): app_module.set_windows_app_id()
+        self.assertEqual(calls, ['CurriculoGuard.App'])
+        broken = types.SimpleNamespace(windll=types.SimpleNamespace(shell32=types.SimpleNamespace(SetCurrentProcessExplicitAppUserModelID=lambda *_: (_ for _ in ()).throw(OSError('falhou')))))
+        with patch.object(sys, 'platform', 'win32'), patch.dict(sys.modules, {'ctypes': broken}): app_module.set_windows_app_id()   # não levanta
+
+
 class DetectionRegressionTests(unittest.TestCase):
     """Brechas achadas na revisão da v2.0: contraste, cobertura fragmentada, gradientes e frases."""
     def setUp(self):
@@ -79,7 +101,7 @@ class DetectionRegressionTests(unittest.TestCase):
 
     # --- sobreposição por união ---
     def test_covered_fraction_uses_union(self):
-        from engine import covered_fraction
+        from curriculo_guard.engine import covered_fraction
         box=(0,0,100,10)
         self.assertAlmostEqual(covered_fraction(box,[(0,0,50,10),(50,0,100,10)]),1.0,places=2)
         self.assertAlmostEqual(covered_fraction(box,[(0,0,60,10),(40,0,100,10)]),1.0,places=2)
@@ -176,7 +198,7 @@ class DetectionRegressionTests(unittest.TestCase):
             self.assertEqual(self.kinds(path),[],rotation)
     def test_text_free_image_removes_text_and_keeps_background(self):
         import numpy as np
-        from engine import text_free_image
+        from curriculo_guard.engine import text_free_image
         def draw(p): p.draw_rect(pymupdf.Rect(0,0,200,200),fill=(.1,.2,.4),color=None); p.insert_text((20,60),'TEXTO BRANCO',fontsize=20,color=(1,1,1))
         path=self.page('tf',draw)
         with pymupdf.open(path) as doc, pymupdf.open(path) as scratch:
@@ -209,7 +231,7 @@ class DetectionRegressionTests(unittest.TestCase):
         from unittest.mock import patch
         def draw(p): p.insert_text((50,60),'Experiencia profissional',fontsize=12); p.insert_text((50,120),'PAYLOAD',fontsize=12,color=(1,1,1))
         path=self.page('fb',draw)
-        with patch('engine.text_free_image',return_value=None): result=analyze_pdf(path)
+        with patch('curriculo_guard.engine.text_free_image',return_value=None): result=analyze_pdf(path)
         self.assertIn('baixo_contraste',[a['type'] for a in result['alerts']]); self.assertNotIn('PAYLOAD',result['text']); self.assertIn('Experiencia',result['text'])
 
     def test_reportlab_resume_has_no_false_alerts(self):
@@ -256,10 +278,10 @@ class DetectionRegressionTests(unittest.TestCase):
     # --- motor separado da interface gráfica ---
     def run_python(self,code):
         import subprocess, sys
-        out=subprocess.run([sys.executable,'-W','ignore','-c',code],cwd=Path(__file__).parent,capture_output=True,text=True,timeout=60)
+        out=subprocess.run([sys.executable,'-W','ignore','-c',code],cwd=Path(__file__).resolve().parent.parent,capture_output=True,text=True,timeout=60)
         return out.stdout.strip().splitlines()[-1:],out.stderr
     def test_engine_never_imports_tkinter(self):
-        result,err=self.run_python("import sys; import engine; print('tkinter' in sys.modules)")
+        result,err=self.run_python("import sys; import curriculo_guard.engine; print('tkinter' in sys.modules)")
         self.assertEqual(result,['False'],err)
     def test_ui_module_imports_without_tkinter(self):
         result,err=self.run_python("import sys; sys.modules['tkinter']=None; import app; assert app.tk is None; print('ok')")
@@ -268,7 +290,7 @@ class DetectionRegressionTests(unittest.TestCase):
 
 class AssetAndConsistencyTests(unittest.TestCase):
     """Ícone do aplicativo e coerência entre a interface e o motor."""
-    ASSETS=Path(__file__).resolve().parent/'assets'
+    ASSETS=Path(__file__).resolve().parent.parent/'assets'
 
     @staticmethod
     def load_module(path,name):
@@ -303,15 +325,15 @@ class AssetAndConsistencyTests(unittest.TestCase):
         self.assertEqual(load_icons(broken,folder=self.ASSETS),{})
 
     def test_engine_error_labels_match_the_interface_labels_and_ranges(self):
-        from engine import SETTING_LIMITS, OPTION_LIMITS
-        source=(Path(__file__).resolve().parent/'app.py').read_text(encoding='utf-8')
+        from curriculo_guard.engine import SETTING_LIMITS, OPTION_LIMITS
+        source=(Path(__file__).resolve().parent.parent/'app.py').read_text(encoding='utf-8')
         for key,label,low,high in SETTING_LIMITS+OPTION_LIMITS:
             self.assertIn(label,source,f'{key}: a interface não usa o rótulo {label!r}'); self.assertIn(f'({low}–{high})',source,f'{key}: faixa {low}–{high} ausente na interface')
 
     def test_form_labels_never_exceed_the_compact_width(self):
         import re
         from app import COMPACT_LABEL_WIDTH
-        source=(Path(__file__).resolve().parent/'app.py').read_text(encoding='utf-8')
+        source=(Path(__file__).resolve().parent.parent/'app.py').read_text(encoding='utf-8')
         labels=re.findall(r"self\.field\(\w+,\s*'([^']+)'[^)]*compact=True",source)+re.findall(r"\('([^']+)',self\.\w+\)",source[source.index("for label, var in [('DPI"):][:900])
         self.assertGreaterEqual(len(labels),8)
         for label in labels: self.assertLessEqual(len(label),COMPACT_LABEL_WIDTH,label)
@@ -331,7 +353,7 @@ class BatteryRegressionTests(unittest.TestCase):
 
     # --- validação de URL ---
     def test_url_validation_rejects_multicast_and_control_characters(self):
-        from engine import is_public_https
+        from curriculo_guard.engine import is_public_https
         for url in ('https://224.0.0.1/a.pdf','https://127.0.0.1/a.pdf','https://10.0.0.5/a.pdf','https://169.254.169.254/x','https://[::1]/a.pdf',
                     'https://[::ffff:127.0.0.1]/a.pdf','https://2130706433/a.pdf','https://0x7f.0.0.1/a.pdf','https://8.8.8.8:8443/a.pdf',
                     'https://u:p@8.8.8.8/a.pdf','http://8.8.8.8/a.pdf','https://8.8.8.8/a.pdf\r\nHost: x','https://8.8.8.8/a b.pdf','https://8.8.8.8/\x00.pdf'):
@@ -339,7 +361,7 @@ class BatteryRegressionTests(unittest.TestCase):
 
     # --- pastas extras ---
     def test_extra_folder_names_must_work_on_every_system(self):
-        from engine import validate_params, valid_folder_name
+        from curriculo_guard.engine import validate_params, valid_folder_name
         for name in ('-','  ','--','a ',' a','CON','nul','COM1','lpt9','aprovados','Relatorios','..','a/b','a\\b','x'*41,'','a\x00b'):
             self.assertFalse(valid_folder_name(name,('aprovados','relatorios')),repr(name))
             with self.assertRaises(ValueError): validate_params({'root':'x','extra':[name]})
@@ -348,7 +370,7 @@ class BatteryRegressionTests(unittest.TestCase):
 
     # --- links simbólicos na pasta de entrada ---
     def test_symlinks_in_input_folder_are_ignored_and_never_copied(self):
-        from engine import run_batch
+        from curriculo_guard.engine import run_batch
         inbox=self.root/'in'; inbox.mkdir(); outside=self.root/'fora'; outside.mkdir()
         (outside/'segredo.txt').write_text('SENHA-DO-BANCO-12345'); secret_pdf=self.page('privado',lambda p:p.insert_text((50,60),'CONTRATO CONFIDENCIAL',fontsize=12))
         shutil.move(str(secret_pdf),str(outside/'privado.pdf')); self.page('normal',lambda p:p.insert_text((50,60),'Experiencia com Python',fontsize=12)); shutil.move(str(self.root/'normal.pdf'),str(inbox/'normal.pdf'))
@@ -385,8 +407,8 @@ class BatteryRegressionTests(unittest.TestCase):
     def test_child_memory_limit_stops_runaway_allocations(self):
         import subprocess, sys
         if os.name=='nt': self.skipTest('RLIMIT_AS não existe no Windows')
-        code="import sys; sys.path.insert(0,'.'); import engine; engine._limit_memory(600)\ntry: bytearray(900*2**20); print('ALOCOU')\nexcept MemoryError: print('BARRADO')"
-        out=subprocess.run([sys.executable,'-c',code],cwd=Path(__file__).parent,capture_output=True,text=True,timeout=60)
+        code="import sys; sys.path.insert(0,'.'); import curriculo_guard.engine as engine; engine._limit_memory(600)\ntry: bytearray(900*2**20); print('ALOCOU')\nexcept MemoryError: print('BARRADO')"
+        out=subprocess.run([sys.executable,'-c',code],cwd=Path(__file__).resolve().parent.parent,capture_output=True,text=True,timeout=60)
         self.assertEqual(out.stdout.strip(),'BARRADO',out.stderr)
     def test_glyph_bomb_is_rejected_without_exhausting_memory(self):
         if os.name=='nt': self.skipTest('sem teto de memória no Windows')
@@ -396,11 +418,11 @@ class BatteryRegressionTests(unittest.TestCase):
 
     # --- Unicode: usos comuns x suspeitos ---
     def test_common_invisible_characters_are_not_suspicious(self):
-        from engine import suspicious_format_characters as sfc
+        from curriculo_guard.engine import suspicious_format_characters as sfc
         for text in ('نرم\u200cافزار','क्\u200dष','Skills: \U0001F469\u200d\U0001F4BB','שלום\u200f world','Experiência \u200eProfissional','enge\u00adnharia de soft\u00adware','\ufeffCurrículo','\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F bandeira'):
             self.assertEqual(sfc(text),[],repr(text))
     def test_suspicious_invisible_characters_are_reported(self):
-        from engine import suspicious_format_characters as sfc
+        from curriculo_guard.engine import suspicious_format_characters as sfc
         for text in ('Py\u200bthon','Py\u2060thon','Py\u200cthon','\u202etxet','a\u2066b','Python\U000E0041\U000E0042','x\u200b\u200c\u200dy','a\u2062b'):
             self.assertTrue(sfc(text),repr(text))
     def test_unicode_tag_smuggling_is_decoded_for_instruction_search(self):

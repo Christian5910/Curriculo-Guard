@@ -12,8 +12,8 @@ from pathlib import Path
 from unittest.mock import patch
 import numpy as np
 import pymupdf
-import engine
-from engine import analyze_pdf, dropped_letters, mupdf_only_ink, reference_render, validate_params
+from curriculo_guard import engine
+from curriculo_guard.engine import analyze_pdf, dropped_letters, mupdf_only_ink, reference_render, validate_params
 
 PAYLOAD = 'HIDDENPAYLOAD lorem ipsum dolor sit amet consectetur'
 HAS_PDFIUM = engine._pdfium is not None

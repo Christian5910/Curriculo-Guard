@@ -9,7 +9,7 @@ try:
 except ImportError:  # ambiente sem Tk: render_preview continua disponível
     tk = ttk = filedialog = messagebox = None
 import pymupdf
-from workflow import ReviewStore, limit_memory, CHILD_MEMORY_MB
+from .workflow import ReviewStore, limit_memory, CHILD_MEMORY_MB
 
 
 def _render_child(sender, path, number, boxes):

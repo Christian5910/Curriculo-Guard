@@ -20,9 +20,9 @@ from pathlib import Path
 from unittest.mock import patch
 import pymupdf
 import requests
-import engine
-from engine import _pdf_strings, _unescape_pdf_string, analyze_pdf, _is_public_ip, _guarded_create_connection, strict_egress, download_pdf, manifest_urls, scrub, Pipeline, run_batch
-from workflow import ReviewStore, FileLock, LockBusy, SourceRegistry
+from curriculo_guard import engine
+from curriculo_guard.engine import _pdf_strings, _unescape_pdf_string, analyze_pdf, _is_public_ip, _guarded_create_connection, strict_egress, download_pdf, manifest_urls, scrub, Pipeline, run_batch
+from curriculo_guard.workflow import ReviewStore, FileLock, LockBusy, SourceRegistry
 
 
 def listener():
@@ -64,7 +64,7 @@ class EgressGuardTests(unittest.TestCase):
         # A validação do app consome a 1ª resposta (pública); a conexão real recebe a 2ª (loopback).
         validate = lambda url: dns('rebind.example.test', 443)
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup); dest = Path(tmp.name) / 'cv.pdf'
-        with patch('socket.getaddrinfo', dns), patch('engine.is_public_https', side_effect=validate):
+        with patch('socket.getaddrinfo', dns), patch('curriculo_guard.engine.is_public_https', side_effect=validate):
             with self.assertRaisesRegex(ValueError, 'bloqueado'): download_pdf(f'https://rebind.example.test:{port}/cv.pdf', dest)
         thread.join(1.5)
         self.assertEqual(len(calls), 2, 'validação e conexão deveriam ter consultado o DNS')
@@ -172,7 +172,7 @@ class UnicodeRobustnessTests(unittest.TestCase):
         pdf = self.root / 'a.pdf'; self.simple_pdf(pdf)
         ruim = {'alerts': [], 'text': 'ok', 'metrics': {'pages': float('nan')}}
         pipe = Pipeline(self.root / 'saida')
-        with patch('engine.analyze_isolated', return_value=ruim):
+        with patch('curriculo_guard.engine.analyze_isolated', return_value=ruim):
             status, target = pipe.process(pdf)
         self.assertEqual(status, 'quarentena')
         report = json.loads((pipe.root / 'relatorios' / (target.stem + '.json')).read_text(encoding='utf-8'))
@@ -207,12 +207,12 @@ class ReviewDecisionTests(unittest.TestCase):
         self.assertEqual(json.loads(self.report.read_text(encoding='utf-8'))['history'], [])
 
     def test_copy_failure_restores_the_released_text(self):
-        with patch('workflow.shutil.copy2', side_effect=OSError('disco cheio')):
+        with patch('curriculo_guard.workflow.shutil.copy2', side_effect=OSError('disco cheio')):
             with self.assertRaisesRegex(OSError, 'disco cheio'): self.store.decide(self.report, 'rejeitados', 'Ana', 'Revogar')
         self.assert_unchanged()
 
     def test_report_write_failure_restores_text_and_removes_the_copy(self):
-        with patch('workflow.write_report', side_effect=OSError('sem permissão')):
+        with patch('curriculo_guard.workflow.write_report', side_effect=OSError('sem permissão')):
             with self.assertRaisesRegex(OSError, 'sem permissão'): self.store.decide(self.report, 'rejeitados', 'Ana', 'Revogar')
         self.assert_unchanged()
 
@@ -220,7 +220,7 @@ class ReviewDecisionTests(unittest.TestCase):
         import shutil
         def corrupting_copy(src, dst):
             shutil.copyfile(src, dst); Path(dst).write_bytes(Path(dst).read_bytes() + b'adulterado')
-        with patch('workflow.shutil.copy2', corrupting_copy):
+        with patch('curriculo_guard.workflow.shutil.copy2', corrupting_copy):
             with self.assertRaisesRegex(ValueError, 'Integridade'): self.store.decide(self.report, 'rejeitados', 'Ana', 'Revogar')
         self.assert_unchanged()   # a cópia adulterada é removida e o TXT volta
 
@@ -250,11 +250,11 @@ class PreviewMemoryCapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pdf = Path(tmp) / 'a.pdf'
             with pymupdf.open() as doc: doc.new_page(width=400, height=200).insert_text((30, 50), 'Experiencia', fontsize=12); doc.save(pdf)
-            code = ("import sys, resource; sys.path.insert(0, '.'); import review_ui\n"
+            code = ("import sys, resource; sys.path.insert(0, '.'); import curriculo_guard.review_ui as review_ui\n"
                     "class S:\n    sent = []\n    def send(self, m): S.sent.append(m)\n    def close(self): pass\n"
                     "review_ui._render_child(S(), sys.argv[1], 0, [])\n"
                     "print(resource.getrlimit(resource.RLIMIT_AS)[0] // 2**20, S.sent[0][0])")
-            out = subprocess.run([sys.executable, '-c', code, str(pdf)], capture_output=True, text=True, cwd=Path(__file__).parent).stdout.split()
+            out = subprocess.run([sys.executable, '-c', code, str(pdf)], capture_output=True, text=True, cwd=Path(__file__).resolve().parent.parent).stdout.split()
         self.assertEqual(out, [str(engine.CHILD_MEMORY_MB), 'ok'])   # teto aplicado e a prévia continua funcionando
 
     def test_preview_memory_error_has_a_clear_message(self):
@@ -262,8 +262,8 @@ class PreviewMemoryCapTests(unittest.TestCase):
         class Sender:
             def send(self, message): sent.append(message)
             def close(self): pass
-        import review_ui
-        with patch('review_ui.pymupdf.open', side_effect=MemoryError()), patch('review_ui.limit_memory'):
+        from curriculo_guard import review_ui
+        with patch('curriculo_guard.review_ui.pymupdf.open', side_effect=MemoryError()), patch('curriculo_guard.review_ui.limit_memory'):
             review_ui._render_child(Sender(), 'x.pdf', 0, [])
         self.assertEqual(sent[0][0], 'error'); self.assertIn('Memória excedeu', sent[0][1])
 
@@ -398,14 +398,14 @@ class ConcurrentReviewTests(unittest.TestCase):
     def pdfs(self): return {p: len(list((self.pipe.root / p).glob('*.pdf'))) for p in ('aprovados', 'rejeitados', 'verificacao_humana')}
 
     def test_simultaneous_decisions_are_serialized_without_orphans(self):
-        real = __import__('workflow').shutil.copy2
+        real = __import__('curriculo_guard.workflow', fromlist=['shutil']).shutil.copy2
         def slow(a, b): real(a, b); time.sleep(0.05)      # alarga a janela, como disco de rede ou antivírus
         barrier = threading.Barrier(2); errors = []
         def reviewer(destino, nome):
             barrier.wait()
             try: ReviewStore(self.pipe.root).decide(self.report, destino, nome, 'decisão de ' + nome)
             except Exception as exc: errors.append(exc)
-        with patch('workflow.shutil.copy2', slow):
+        with patch('curriculo_guard.workflow.shutil.copy2', slow):
             threads = [threading.Thread(target=reviewer, args=('rejeitados', 'Ana')), threading.Thread(target=reviewer, args=('verificacao_humana', 'Bruno'))]
             [t.start() for t in threads]; [t.join() for t in threads]
         data = json.loads(self.report.read_text(encoding='utf-8'))
@@ -428,7 +428,7 @@ class ConcurrentReviewTests(unittest.TestCase):
         self.store.LOCK_TIMEOUT = 0.2
         with FileLock(self.report.with_suffix('.lock')):
             with self.assertRaisesRegex(LockBusy, 'Outra pessoa está decidindo'): self.store.decide(self.report, 'rejeitados', 'Ana', 'x')
-        with patch('workflow.shutil.copy2', side_effect=OSError('disco cheio')):
+        with patch('curriculo_guard.workflow.shutil.copy2', side_effect=OSError('disco cheio')):
             with self.assertRaises(OSError): self.store.decide(self.report, 'rejeitados', 'Ana', 'x')
         self.assertFalse(self.report.with_suffix('.lock').exists(), 'a falha não pode deixar a trava presa')
         self.store.decide(self.report, 'rejeitados', 'Ana', 'x')   # e uma nova tentativa funciona
@@ -487,7 +487,7 @@ class IncrementalBatchTests(unittest.TestCase):
 
     def test_file_that_failed_for_a_transient_reason_replaces_its_quarantine_when_it_passes(self):
         """Mesmo conteúdo (SHA-256 igual): a tentativa em quarentena é substituída pela análise bem-sucedida."""
-        with patch('engine.analyze_isolated', side_effect=TimeoutError('tempo esgotado')):
+        with patch('curriculo_guard.engine.analyze_isolated', side_effect=TimeoutError('tempo esgotado')):
             self.assertEqual(self.run_it(), {'quarentena': 3})
         self.assertEqual(self.files('quarentena'), 3)
         self.assertEqual(self.run_it(), {'aprovados': 3})                                   # agora a análise funciona
@@ -515,7 +515,7 @@ class IncrementalBatchTests(unittest.TestCase):
         pdf = self.root / 'remoto.pdf'; make_cv(pdf, 'Curriculo vindo de uma URL'); payload = pdf.read_bytes()
         def fake_download(link, dest, cancel=None): Path(dest).write_bytes(payload)
         def run():
-            with patch('engine.download_pdf', fake_download):
+            with patch('curriculo_guard.engine.download_pdf', fake_download):
                 return dict(run_batch({'root': str(self.out)}, url='https://h.example/cv.pdf', report=lambda k, v: None))
         self.assertEqual(run(), {'aprovados': 1}); self.assertEqual(run(), {'ja_processados': 1}); self.assertEqual(run(), {'ja_processados': 1})
         self.assertEqual((self.files('originais'), self.files('duplicados')), (1, 0))   # antes: um download e um duplicado novos por rodada
@@ -535,7 +535,7 @@ class IncrementalBatchTests(unittest.TestCase):
         self.assertFalse((self.out / '.lote.lock').exists(), 'o lote libera a trava ao terminar')
 
     def test_lock_is_released_even_when_the_batch_fails_midway(self):
-        with patch('engine.manifest_urls', side_effect=RuntimeError('falha simulada')):
+        with patch('curriculo_guard.engine.manifest_urls', side_effect=RuntimeError('falha simulada')):
             with self.assertRaises(RuntimeError): run_batch({'root': str(self.out)}, url='https://h.example/m.json')
         self.assertFalse((self.out / '.lote.lock').exists())
 
@@ -558,7 +558,7 @@ class DownloadLimitTests(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start(); self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
         tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup); dest = Path(tmp.name) / 'x.pdf'
         self.assertLess(len(handler.body), 200_000)
-        with patch('engine.is_public_https'), patch('engine._is_public_ip', return_value=True):
+        with patch('curriculo_guard.engine.is_public_https'), patch('curriculo_guard.engine._is_public_ip', return_value=True):
             with self.assertRaisesRegex(ValueError, 'excede 15 MB'): download_pdf(f'http://127.0.0.1:{server.server_address[1]}/b.pdf', dest)
         self.assertEqual(list(Path(tmp.name).iterdir()), [], 'nem o PDF nem o temporário podem sobrar')
 
@@ -592,19 +592,19 @@ class ManifestTests(unittest.TestCase):
     def test_cancel_interrupts_a_manifest_served_one_byte_at_a_time(self):
         def drip(size, decode_content=True): time.sleep(.05); return b' '
         cancel = threading.Event(); threading.Timer(.3, cancel.set).start(); start = time.monotonic()
-        with patch('engine.requests.Session', self.fake_session(drip)), patch('engine.is_public_https'):
+        with patch('curriculo_guard.engine.requests.Session', self.fake_session(drip)), patch('curriculo_guard.engine.is_public_https'):
             with self.assertRaisesRegex(ValueError, 'cancelado'): manifest_urls('https://h.example/m.json', cancel)
         self.assertLess(time.monotonic() - start, 3)
 
     def test_deadline_applies_to_the_manifest(self):
         def drip(size, decode_content=True): time.sleep(.05); return b' '
         start = time.monotonic()
-        with patch('engine.requests.Session', self.fake_session(drip)), patch('engine.is_public_https'), patch('engine.MANIFEST_DEADLINE_S', .5):
+        with patch('curriculo_guard.engine.requests.Session', self.fake_session(drip)), patch('curriculo_guard.engine.is_public_https'), patch('curriculo_guard.engine.MANIFEST_DEADLINE_S', .5):
             with self.assertRaises(TimeoutError): manifest_urls('https://h.example/m.json')
         self.assertLess(time.monotonic() - start, 3)
 
     def test_manifest_size_limit_still_applies(self):
-        with patch('engine.requests.Session', self.fake_session(lambda size, decode_content=True: b'x' * 70000)), patch('engine.is_public_https'):
+        with patch('curriculo_guard.engine.requests.Session', self.fake_session(lambda size, decode_content=True: b'x' * 70000)), patch('curriculo_guard.engine.is_public_https'):
             with self.assertRaisesRegex(ValueError, '64 KB'): manifest_urls('https://h.example/m.json')
 
     def test_real_http_server_dripping_bytes_is_interrupted(self):
@@ -613,14 +613,14 @@ class ManifestTests(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
         cancel = threading.Event(); threading.Timer(1.0, cancel.set).start(); start = time.monotonic()
-        with patch('engine.is_public_https'), patch('engine._is_public_ip', return_value=True):   # só o loopback do teste é liberado
+        with patch('curriculo_guard.engine.is_public_https'), patch('curriculo_guard.engine._is_public_ip', return_value=True):   # só o loopback do teste é liberado
             with self.assertRaisesRegex(ValueError, 'cancelado'): manifest_urls(f'http://127.0.0.1:{server.server_address[1]}/lista.json', cancel)
         self.assertLess(time.monotonic() - start, 5)
 
     def test_run_batch_forwards_cancel_to_the_manifest_reader(self):
         import tempfile
         cancel = threading.Event()
-        with tempfile.TemporaryDirectory() as tmp, patch('engine.manifest_urls', return_value=[]) as reader:
+        with tempfile.TemporaryDirectory() as tmp, patch('curriculo_guard.engine.manifest_urls', return_value=[]) as reader:
             engine.run_batch({'root': tmp}, url='https://h.example/m.json', cancel=cancel)
         reader.assert_called_once_with('https://h.example/m.json', cancel)
 

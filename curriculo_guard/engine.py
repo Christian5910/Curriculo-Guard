@@ -8,7 +8,7 @@ import base64, binascii, codecs, os, re, json, shutil, tempfile, threading, sock
 import unicodedata, uuid, time, multiprocessing, math, bisect, contextlib
 from collections import Counter
 from itertools import islice
-from workflow import sha256_file, atomic_write, write_report, limit_memory as _limit_memory, CHILD_MEMORY_MB, FileLock, SourceRegistry
+from .workflow import sha256_file, atomic_write, write_report, limit_memory as _limit_memory, CHILD_MEMORY_MB, FileLock, SourceRegistry
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from datetime import datetime, timezone
@@ -19,7 +19,7 @@ import numpy as np
 try: import pypdfium2 as _pdfium   # opcional: segunda opinião de renderizador (ver reference_render)
 except Exception: _pdfium = None
 
-APP_VERSION = '2.10'
+APP_VERSION = '2.11'
 DOWNLOAD_DEADLINE_S = 90   # prazo total de um download, mesmo que o servidor "goteje" bytes
 MANIFEST_DEADLINE_S = 30   # prazo total para ler o manifesto de URLs (mesma defesa contra o gotejamento)
 LEGIBLE_RATIO = 3.0        # contraste (na página já renderizada) a partir do qual o texto é legível

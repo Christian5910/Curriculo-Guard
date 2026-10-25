@@ -1,12 +1,12 @@
 """Currículo Guard: interface gráfica (Tkinter) sobre o motor `engine.py`.
 
-Execute com `python app.py`. Toda a análise vive em engine.py/workflow.py;
+Execute com `python app.py`. Toda a análise vive em curriculo_guard/ (engine.py, workflow.py, review_ui.py);
 este arquivo apenas coleta parâmetros, dispara o lote numa thread e mostra o andamento.
 """
-import json, threading, queue, multiprocessing
+import json, sys, threading, queue, multiprocessing
 from pathlib import Path
-from engine import validate_params, run_batch
-from review_ui import ReviewPanel
+from curriculo_guard.engine import validate_params, run_batch
+from curriculo_guard.review_ui import ReviewPanel
 try:
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
@@ -17,6 +17,15 @@ ASSETS = Path(__file__).resolve().parent / 'assets'
 ICON_SIZES = (256, 64, 48, 32, 16)   # janela/barra de tarefas; o cabeçalho usa HEADER_ICON
 HEADER_ICON = 48
 COMPACT_LABEL_WIDTH = 46   # em caracteres: cabe o rótulo mais longo e mantém as caixas alinhadas
+
+
+def set_windows_app_id():
+    """No Windows, dá ao programa identidade própria na barra de tarefas (sem isso ele aparece agrupado como "Python")."""
+    if sys.platform != 'win32': return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('CurriculoGuard.App')
+    except Exception: pass   # só cosmético: nunca impede o programa de abrir
 
 
 def load_icons(photo_image, folder=ASSETS, sizes=ICON_SIZES):
@@ -194,4 +203,5 @@ class App:
 if __name__=='__main__':
     multiprocessing.freeze_support()
     if tk is None: raise SystemExit('Tkinter não encontrado. No Ubuntu/Debian: sudo apt install python3-tk')
+    set_windows_app_id()
     root=tk.Tk(); App(root); root.mainloop()
