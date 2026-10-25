@@ -17,3 +17,13 @@ triagem/
 .idea/
 .DS_Store
 Thumbs.db
+
+# EXE: o que é GERADO (pesado) fica fora do Git; os scripts e o lançador em EXE/construcao/ entram.
+EXE/CurriculoGuard-Portatil/
+EXE/CurriculoGuard-Portatil.zip
+EXE/CurriculoGuard-Setup.exe
+EXE/construcao/cache/
+
+
+
+Antigo

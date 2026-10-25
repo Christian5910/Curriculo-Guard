@@ -1,0 +1,23 @@
+CURRÍCULO GUARD - VERSÃO PORTÁTIL (Windows 10 ou 11, 64 bits)
+
+COMO USAR
+  Dê dois cliques em  CurriculoGuard.exe.
+  Não precisa instalar nada, nem ter Python, nem ser administrador.
+
+COMO LEVAR PARA OUTRO COMPUTADOR
+  Copie esta pasta INTEIRA (CurriculoGuard.exe, app e runtime) para onde quiser:
+  outra pasta, um pendrive, a nuvem. O CurriculoGuard.exe sozinho NÃO funciona,
+  porque precisa das pastas "runtime" e "app" ao lado dele.
+
+ONDE FICAM OS RESULTADOS
+  Na pasta "dados", criada ao lado do CurriculoGuard.exe (a pasta "triagem" fica dentro dela).
+  Você pode trocar a pasta de saída dentro do programa.
+
+SE O WINDOWS AVISAR "O Windows protegeu o seu computador" (SmartScreen)
+  O programa não tem assinatura digital paga, por isso o aviso aparece.
+  Clique em "Mais informações" e depois em "Executar assim mesmo".
+
+COMO REMOVER
+  Apague a pasta. Nada é gravado fora dela (nem no registro do Windows).
+
+Explicação completa: EXE\LEIA-ME.md no projeto.

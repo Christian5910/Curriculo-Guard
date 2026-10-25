@@ -1,0 +1,9 @@
+python-windows.tar.gz  sha256=d785d2e901a8194dcdb8c23c2b37a46ed84fdc04e87398dc5b832644330de71e
+certifi-2026.10.18-py3-none-any.whl  sha256=73191c47aaa79da394e8fee2dbc2ec827432cab56311122c9e47abf79e390f62
+charset_normalizer-3.5.2-cp312-cp312-win_amd64.whl  sha256=780fbe7cab297b81dad9fb8dc5eb003c0468ffb0d9e5f65068c53a34661a96bc
+idna-3.20-py3-none-any.whl  sha256=ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+numpy-2.5.4-cp312-cp312-win_amd64.whl  sha256=a7b1b6353e36a7e50de2973a38d705c88ee93adcf120673cee7f45a4a3fa223a
+pymupdf-1.28.2-cp310-abi3-win_amd64.whl  sha256=ebd244918798502d7b4504c90410d1711a4d7675a32584ca30f1bab419ecbffe
+pypdfium2-5.14.0-py3-none-win_amd64.whl  sha256=149fd5c6397b8df8bf7911a93506eff0be874f877afe7ac936cf5d37d21a6a06
+requests-2.34.2-py3-none-any.whl  sha256=2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
+urllib3-2.8.0-py3-none-any.whl  sha256=0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3
