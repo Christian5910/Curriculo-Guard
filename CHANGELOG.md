@@ -1,3 +1,27 @@
+# Versão 2.11
+
+Organização do projeto e executável para Windows. Não muda nenhuma regra de análise: os testes de análise e as quatro avaliações têm o mesmo resultado da 2.10.
+
+Organização:
+
+- **Raiz enxuta:** `app.py` é o único arquivo Python da raiz. O motor, a persistência e a revisão foram para o pacote `curriculo_guard/` (`engine.py`, `workflow.py`, `review_ui.py`), os testes para `tests/`, e as importações e os caminhos de testes, avaliações e CI foram reescritos. Os testes rodam com `python -m unittest discover -s tests -t .` e com `python -m pytest` (há um `pytest.ini`; os dois dão 198 testes). O aplicativo abre a partir de qualquer pasta de trabalho.
+- **Cópias antigas removidas da raiz:** `tests.yml`, `run_pdfs.py`, `GUIA_DE_USO.md` (v2.2), `entrada.png` e `revisao.png` eram versões antigas de arquivos que já existem em `.github/workflows/`, `evaluation/` e `docs/`. `icone_curriculo_guard.png` foi para `assets/` e `commit.txt` para `docs/commit_antigo_v2.2.txt`.
+
+Executável para Windows (`EXE/`, com explicação passo a passo em `EXE/LEIA-ME.md`):
+
+- **Portátil:** `EXE/CurriculoGuard-Portatil/CurriculoGuard.exe`, sem instalar nada e sem Python (132 MB: Python 3.12 embutido, com o Tk da interface, mais as bibliotecas). Os dados ficam em `dados\` ao lado do programa.
+- **Instalador:** `EXE/CurriculoGuard-Setup.exe` (33 MB, NSIS). Instala só para o usuário (sem administrador), cria atalhos e desinstalador, e os dados ficam em *Documentos\Curriculo Guard*, que o desinstalador não apaga.
+- **O que os gera (`EXE/construcao/`):** `construir.py` (baixa o Python para Windows com SHA-256 fixo, baixa as bibliotecas para Windows com o pip, monta a pasta, confere e gera o instalador), o lançador `CurriculoGuard.exe` com o código-fonte em C, o script do instalador e `verificar_portatil.py` (autoteste que roda com o Python embutido). Os binários gerados ficam fora do Git (`.gitignore`); o lançador compilado e os scripts entram.
+- **Um defeito que só uma análise estática achou:** o PyMuPDF exige a `msvcp140.dll` do Visual C++ e não a traz. O Wine a fornece sozinho, então o teste passava, mas num Windows limpo o programa falharia ao abrir PDFs. `construir.py` agora lê as importações de todos os binários (leitor de PE em Python puro, idêntico ao `objdump` nos 69 binários), completa a DLL a partir da cópia que o NumPy já traz e **falha o build** se faltar qualquer DLL que não seja do Windows.
+- **Identidade na barra de tarefas:** no Windows o programa ganha um identificador próprio (sem isso aparece agrupado como "Python"); é cosmético e nunca impede a abertura.
+- **CI:** novo job `portatil-windows` monta o portátil num Windows de verdade, roda o autoteste com o Python embutido e abre o `CurriculoGuard.exe`.
+
+Como foi verificado, sem Windows aqui: o Python para Windows e todo o pacote rodaram no **Wine 11** (o Wine 9.0 não serve: não implementa uma função do NumPy). No Wine: todas as bibliotecas importam; a análise de 3 PDFs dá o resultado certo, inclusive com o pdfium e com os processos filhos `spawn` do Windows; o `CurriculoGuard.exe` abre a interface e cria `dados\`; o instalador instala, atualiza por cima, cria atalhos e registro, abre o programa instalado (dados em Documentos) e desinstala preservando os dados. Esse teste de atalhos só funcionou com locale UTF-8 no container (limitação do ambiente de teste, não do instalador).
+
+**Não foi testado, e vale testar:** um Windows 10/11 real (o job da CI cobre a montagem e a abertura, não o duplo clique de um usuário), o aviso do SmartScreen e de antivírus (o programa não é assinado), telas de alta resolução com escala de 125% a 200% (o Tk pode ficar levemente borrado) e o instalador em pasta com acento ou em conta sem permissão de gravação em `%LOCALAPPDATA%`.
+
+Testes: 188 → 198 (2 da identidade na barra de tarefas e 8 em `tests/test_construir.py`: leitor de DLLs, dependências ausentes, complemento da DLL do Visual C++ e coerência de versão entre código, `.exe` e instalador). Verificado com unittest e com pytest em Python 3.12.
+
 # Versão 2.10
 
 Quarta bateria, desta vez com leitores independentes (pdfium, poppler, pypdf, pdfminer e pdftotext) como oráculo em vez de raciocínio sobre a especificação.

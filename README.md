@@ -25,7 +25,16 @@ O objetivo é tornar a triagem documental mais transparente: mostrar **o que foi
 
 ## 🚀 Começar
 
-### Requisitos
+### Windows sem instalar Python (executável)
+
+A pasta [`EXE/`](EXE/LEIA-ME.md) traz o programa pronto para Windows 10/11 de 64 bits, sem precisar de Python:
+
+- **Portátil:** `EXE/CurriculoGuard-Portatil/` — dê dois cliques em `CurriculoGuard.exe`. Pode ser copiada para um pendrive.
+- **Instalador:** `EXE/CurriculoGuard-Setup.exe` — instala só para o seu usuário (sem administrador), cria atalhos e um desinstalador.
+
+O passo a passo para quem nunca criou um executável, e como refazê-lo, está em **[EXE/LEIA-ME.md](EXE/LEIA-ME.md)**.
+
+### Requisitos (para rodar pelo código)
 
 - Python **3.11 ou superior**.
 - Tkinter para a interface gráfica.
@@ -51,7 +60,7 @@ python3 -m venv .venv
 
 Tkinter costuma acompanhar a instalação oficial do Python no Windows. No Linux, pode ser necessário instalar o pacote de Tkinter da distribuição, como `python3-tk` no Ubuntu/Debian.
 
-**Mantenha `app.py`, `engine.py`, `workflow.py` e `review_ui.py` na mesma pasta.**
+**Mantenha a estrutura de pastas:** `app.py` na raiz e a pasta `curriculo_guard/` ao lado dele.
 
 ## 🧭 Uma interface, cinco abas
 
@@ -111,10 +120,10 @@ O fundo é medido pixel a pixel numa renderização da própria página sem text
 Com as dependências instaladas:
 
 ```bash
-python -m unittest discover -v
+python -m unittest discover -s tests -t . -v   # ou, se preferir: python -m pytest
 ```
 
-A versão 2.10 passou por **188 testes automatizados** (8 deles usam a interface real e são ignorados em ambientes sem tela), cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV, downloads simulados, DNS rebinding e servidor que goteja bytes (com servidores locais reais), Unicode hostil e nomes de arquivo inválidos, ações e canais internos do PDF, travas entre instâncias e lote incremental. O motor de análise importa e roda sem Tkinter.
+A versão 2.11 passou por **198 testes automatizados** (8 deles usam a interface real e são ignorados em ambientes sem tela), cobrindo filtragem, DPI, contraste contra o fundo real (incluindo texto sobre caixa do mesmo tom, réguas e selos), cobertura fragmentada, gradientes, páginas rotacionadas, frases de injeção (corpus com casos positivos e negativos), conteúdo auxiliar, Unicode, persistência, revisão, integridade, quarentena, limites de tempo, prévia PNG, CSV, downloads simulados, DNS rebinding e servidor que goteja bytes (com servidores locais reais), Unicode hostil e nomes de arquivo inválidos, ações e canais internos do PDF, travas entre instâncias e lote incremental. O motor de análise importa e roda sem Tkinter.
 
 A interface ainda não foi validada visualmente no ambiente de desenvolvimento. Downloads foram testados com respostas simuladas, não com um servidor externo real.
 
@@ -142,18 +151,19 @@ O histórico é um registro local, sem assinatura digital ou autenticação do n
 
 ## 🧩 Organização do código
 
-| Arquivo | Responsabilidade |
+| Caminho | Responsabilidade |
 | --- | --- |
-| `app.py` | Interface gráfica (Tkinter): coleta parâmetros, dispara o lote e mostra o andamento. |
-| `engine.py` | Motor, sem interface: análise do PDF, downloads, roteamento e processamento em lote. |
-| `workflow.py` | Persistência, hashes, revisão humana e exportação. |
-| `review_ui.py` | Fila de revisão e prévia rasterizada. |
-| `assets/` | Ícone do aplicativo: `icon.svg` (fonte), PNGs, `icon.ico` e `make_icons.py`, que os gera. |
+| `app.py` | **Único arquivo Python da raiz.** Interface gráfica (Tkinter): coleta parâmetros, dispara o lote e mostra o andamento. |
+| `curriculo_guard/engine.py` | Motor, sem interface: análise do PDF, downloads, roteamento e processamento em lote. |
+| `curriculo_guard/workflow.py` | Persistência, hashes, travas, revisão humana e exportação. |
+| `curriculo_guard/review_ui.py` | Fila de revisão e prévia rasterizada. |
+| `tests/` | Testes automatizados (`test_security.py` cobre rede, Unicode, travas, lote incremental e canais internos; `test_visual.py`, texto recortado e segunda opinião do pdfium; `test_evasao.py`, evasões do detector; `test_exportacao.py`, CSV; `test_gui.py` roda a interface real). |
 | `evaluation/` | Corpus de frases e scripts que reproduzem os números deste README. |
-| `test_app.py` / `test_revision.py` / `test_security.py` / `test_visual.py` / `test_evasao.py` / `test_exportacao.py` / `test_gui.py` | Testes automatizados; `test_security.py` cobre rede, Unicode, travas, lote incremental e canais internos do PDF; `test_visual.py`, texto recortado, cor sem marca, segunda opinião do pdfium e texto invisível; `test_evasao.py`, evasões do detector e texto legítimo em seis idiomas; `test_exportacao.py`, CSV e relatórios grandes; `test_gui.py` roda a interface real. |
-| `.github/workflows/tests.yml` | Integração contínua: testes e avaliação em Linux e Windows. |
-| `requirements-dev.txt` | Dependências para desenvolver e testar. |
-| `docs/GUIA_DE_USO.md` | Guia detalhado, limites e observações operacionais. |
+| `assets/` | Ícone do aplicativo: `icon.svg` (fonte), PNGs, `icon.ico` e `make_icons.py`, que os gera. |
+| `EXE/` | Executável para Windows (portátil e instalador) e, em `EXE/construcao/`, o que os gera. Ver `EXE/LEIA-ME.md`. |
+| `docs/` | `GUIA_DE_USO.md` (guia detalhado, limites e observações operacionais) e `img/` (capturas de tela). |
+| `.github/workflows/tests.yml` | Integração contínua: testes e avaliação em Linux e Windows, e a montagem do portátil no Windows. |
+| `requirements.txt` / `requirements-dev.txt` / `pytest.ini` | Dependências, dependências de desenvolvimento e configuração do pytest. |
 | `CHANGELOG.md` | Histórico das melhorias. |
 
 ### Usar o motor sem a interface

@@ -57,7 +57,7 @@ jobs:
           sudo apt-get install -y xvfb
 
       - name: Análise estática (imports sem uso, nomes indefinidos)
-        run: python -m pyflakes app.py engine.py workflow.py review_ui.py test_app.py test_revision.py test_security.py test_visual.py test_evasao.py test_exportacao.py test_gui.py assets evaluation
+        run: python -m pyflakes app.py curriculo_guard tests assets evaluation
 
       # REQUIRE_GUI_TESTS=1 faz o teste da interface FALHAR (em vez de ser ignorado) se
       # não houver Tkinter ou tela: assim ele nunca "passa" sem ter realmente rodado.
@@ -65,12 +65,12 @@ jobs:
         if: runner.os == 'Linux'
         env:
           REQUIRE_GUI_TESTS: '1'
-        run: xvfb-run -a python -m unittest discover -v
+        run: xvfb-run -a python -m unittest discover -s tests -t . -v
 
       # No Windows os testes de interface rodam se o Tk abrir uma janela; senão são ignorados.
       - name: Testes automatizados (Windows)
         if: runner.os == 'Windows'
-        run: python -m unittest discover -v
+        run: python -m unittest discover -s tests -t . -v
 
       # Estes scripts reproduzem os números citados no README. Com --check, saem
       # com erro se a qualidade cair abaixo do que foi medido (regressão).
@@ -87,3 +87,37 @@ jobs:
       # runner, poppler e pdftotext. Ferramentas ausentes são ignoradas.
       - name: Avaliação com renderizadores e extratores independentes
         run: python -m evaluation.run_renderers --check
+
+  # Monta o executável portátil NUM WINDOWS DE VERDADE e confere que ele funciona. É a verificação que
+  # não dá para fazer a partir do Linux. Detalhes em EXE/LEIA-ME.md.
+  portatil-windows:
+    name: Executável portátil (Windows)
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Instalar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Montar a pasta portátil (sem o instalador)
+        run: python EXE/construcao/construir.py --sem-instalador
+
+      # Usa o Python EMBUTIDO na pasta, não o do runner: é o que o usuário final executará.
+      - name: Autoteste com o Python embutido
+        run: EXE\CurriculoGuard-Portatil\runtime\python.exe EXE\construcao\verificar_portatil.py
+
+      - name: Abrir o CurriculoGuard.exe e conferir que a janela sobe
+        shell: pwsh
+        run: |
+          Start-Process -FilePath "EXE\CurriculoGuard-Portatil\CurriculoGuard.exe"
+          Start-Sleep -Seconds 20
+          $programa = Get-Process pythonw -ErrorAction SilentlyContinue
+          if (-not $programa) { throw "O CurriculoGuard.exe não abriu o programa (pythonw.exe não está rodando)." }
+          Write-Host "Programa em execução (pythonw.exe, PID $($programa.Id))."
+          $programa | Stop-Process -Force
+

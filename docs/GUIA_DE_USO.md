@@ -1,6 +1,6 @@
-# Currículo Guard — versão 2.10
+# Currículo Guard — versão 2.11
 
-Aplicativo desktop Python 3.11+ com Tkinter. Código comentado em português. Extraia todos os arquivos do ZIP juntos: app.py depende de engine.py, workflow.py e review_ui.py.
+Aplicativo desktop Python 3.11+ com Tkinter. Código comentado em português. Extraia todos os arquivos do ZIP mantendo as pastas: app.py depende da pasta curriculo_guard/ ao lado dele. Para usar sem instalar Python no Windows, veja EXE/LEIA-ME.md.
 
 ## Executar
 
@@ -65,21 +65,22 @@ Execute PDFs externos em ambiente isolado, com dependências atualizadas. O IP �
 python -m unittest -v
 ```
 
-188 testes automatizados: casos originais de filtragem; preservação de relatórios em duplicatas e reanálises; decisões com histórico; revogação do TXT; alteração/caminho do PDF; campos auxiliares; normalização Unicode; ações ativas; limites de páginas e tempo; geração real de PNG de prévia; CSV; arquivos corrompidos; downloads simulados e limpeza de temporários; texto fora da área visível; fundo heterogêneo; alteração entre análise/cópia e symlinks de fuga; contraste contra o fundo real (texto sobre caixa do mesmo tom, réguas, selos, páginas rotacionadas), cobertura fragmentada, gradientes, frases de injeção e legítimas, letras separadas e homóglifos; reanálise de quarentena; importação sem Tkinter; download com gotejamento (prazo e cancelamento); bombas de memória; links simbólicos; PDF sem relatório; cabeçalho com BOM; destaque translúcido e cobertura parcial; caracteres invisíveis; tags Unicode; manifesto sem proxy de ambiente; relatórios malformados; motor sem Tkinter, `run_batch` e `validate_params`; ícone e cabeçalho; rótulos sem corte e alinhados; fluxo completo pela interface real (lote, revisão, CSV, configuração); DNS rebinding contra servidor local real, NAT64 e IPv4 embutido, manifesto com prazo e cancelamento, Unicode hostil (ToUnicode com meio par UTF-16), nome de arquivo em Latin-1, falhas de cópia e gravação em `decide()` e teto de memória da prévia.
+198 testes automatizados: casos originais de filtragem; preservação de relatórios em duplicatas e reanálises; decisões com histórico; revogação do TXT; alteração/caminho do PDF; campos auxiliares; normalização Unicode; ações ativas; limites de páginas e tempo; geração real de PNG de prévia; CSV; arquivos corrompidos; downloads simulados e limpeza de temporários; texto fora da área visível; fundo heterogêneo; alteração entre análise/cópia e symlinks de fuga; contraste contra o fundo real (texto sobre caixa do mesmo tom, réguas, selos, páginas rotacionadas), cobertura fragmentada, gradientes, frases de injeção e legítimas, letras separadas e homóglifos; reanálise de quarentena; importação sem Tkinter; download com gotejamento (prazo e cancelamento); bombas de memória; links simbólicos; PDF sem relatório; cabeçalho com BOM; destaque translúcido e cobertura parcial; caracteres invisíveis; tags Unicode; manifesto sem proxy de ambiente; relatórios malformados; motor sem Tkinter, `run_batch` e `validate_params`; ícone e cabeçalho; rótulos sem corte e alinhados; fluxo completo pela interface real (lote, revisão, CSV, configuração); DNS rebinding contra servidor local real, NAT64 e IPv4 embutido, manifesto com prazo e cancelamento, Unicode hostil (ToUnicode com meio par UTF-16), nome de arquivo em Latin-1, falhas de cópia e gravação em `decide()` e teto de memória da prévia.
 
 Interface Tkinter ainda sem validação visual neste ambiente. Downloads foram testados com respostas simuladas e com servidores locais, não com servidor externo real: TLS e validação de certificado não têm cobertura automatizada. Os testes não comprovam detecção de todos os ataques.
 
 ## Arquivos
 
-- app.py: interface gráfica (coleta parâmetros e mostra o andamento).
-- engine.py: motor sem interface (análise, download, roteamento e lote); pode ser usado em scripts.
-- workflow.py: gravação atômica, hashes, revisão e exportação.
-- review_ui.py: fila de revisão e prévia.
+- app.py: único arquivo Python da raiz; interface gráfica (coleta parâmetros e mostra o andamento).
+- curriculo_guard/engine.py: motor sem interface (análise, download, roteamento e lote); pode ser usado em scripts (`from curriculo_guard.engine import run_batch`).
+- curriculo_guard/workflow.py: gravação atômica, hashes, travas, revisão e exportação.
+- curriculo_guard/review_ui.py: fila de revisão e prévia.
+- tests/: testes (`python -m unittest discover -s tests -t .` ou `python -m pytest`); test_gui.py usa a interface real e é ignorado sem tela.
+- evaluation/: corpus de frases e scripts que reproduzem as medições (`python -m evaluation.run_phrases`, `run_pdfs`, `run_realistic`, `run_renderers`).
 - assets/: ícone do aplicativo (icon.svg é a fonte; make_icons.py gera os PNGs e o .ico).
-- evaluation/: corpus de frases e scripts que reproduzem as medições (`python -m evaluation.run_phrases`, `run_pdfs`, `run_realistic`).
-- test_app.py, test_revision.py, test_security.py e test_gui.py: testes (test_gui.py usa a interface real e é ignorado sem tela).
-- .github/workflows/tests.yml e requirements-dev.txt: integração contínua e dependências de desenvolvimento.
-- requirements.txt: dependências.
+- EXE/: executável para Windows (portátil e instalador) e os arquivos que o geram; explicação em EXE/LEIA-ME.md.
+- docs/: este guia e as capturas de tela.
+- .github/workflows/tests.yml, requirements.txt, requirements-dev.txt e pytest.ini: integração contínua, dependências e configuração dos testes.
 
 ## Histórico de revisão e limites operacionais
 
